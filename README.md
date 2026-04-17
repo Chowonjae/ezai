@@ -38,6 +38,7 @@ ezai는 이를 중앙 게이트웨이로 해결한다.
 | **배치 처리** | Redis 큐 기반 대량 요청 비동기 처리 |
 | **캐싱** | Redis 기반 동일 요청 응답 캐싱 |
 | **Rate Limiting** | 클라이언트별 요청 빈도 제한 |
+| **클라이언트 인증** | 키 쌍(client_id + secret) 기반 외부 클라이언트 인증, 셀프 로테이션, 만료 관리 |
 | **API 키 관리** | AES-256 암호화 저장, 로테이션, 감사 로그 |
 
 ## 지원 프로바이더
@@ -192,7 +193,9 @@ ezai/
 │   │   ├── batch.go             ← POST /batch, GET /batch/{job_id}
 │   │   ├── usage.go             ← GET /usage, GET /usage/pricing
 │   │   ├── usage_admin.go       ← 비용 아카이브/리셋/삭제 API
-│   │   ├── admin.go             ← 키 관리, 감사 로그, 로그 조회
+│   │   ├── admin.go             ← 프로바이더 키 관리, 감사 로그, 로그 조회
+│   │   ├── clientkey_admin.go   ← 클라이언트 키 발급/목록/폐기/재발급
+│   │   ├── clientkey_rotate.go  ← 클라이언트 키 셀프 로테이션
 │   │   ├── models.go            ← GET /models
 │   │   └── health.go            ← GET /health
 │   ├── model/                   ← 요청/응답 데이터 구조체
@@ -210,11 +213,13 @@ ezai/
 │   │   ├── encrypted.go         ← SQLCipher 암호화 DB
 │   │   ├── keystore.go          ← API 키 CRUD (암호화 저장/복호화)
 │   │   ├── audit.go             ← 키 변경 감사 로그
+│   │   ├── clientkey.go         ← 클라이언트 키 CRUD (해시 저장)
 │   │   ├── requestlog.go        ← 비동기 요청 로그 기록 + 조회
 │   │   ├── usage.go             ← 사용량/비용 집계 조회
 │   │   └── usage_admin.go       ← 아카이브/리셋/삭제 로직
 │   ├── middleware/              ← HTTP 미들웨어
-│   │   ├── auth.go              ← CIDR 기반 인증 + API 키 검증
+│   │   ├── auth.go              ← CIDR 기반 인증 + 클라이언트 키 쌍 검증
+│   │   ├── trustednet.go        ← admin 전용 신뢰 네트워크 제한
 │   │   ├── ratelimit.go         ← Redis 기반 Rate Limiting
 │   │   ├── requestid.go         ← Trace ID 생성
 │   │   ├── clientid.go          ← Client ID 추출
@@ -229,7 +234,10 @@ ezai/
 │   ├── concurrency/
 │   │   └── semaphore.go         ← 프로바이더별 동시성 제어
 │   ├── crypto/
-│   │   └── encrypt.go           ← AES-256-GCM 암호화/복호화
+│   │   ├── encrypt.go           ← AES-256-GCM 암호화/복호화
+│   │   └── secret.go            ← 클라이언트 시크릿 생성 + SHA-256 해시
+│   ├── service/
+│   │   └── clientkey_validator.go ← 클라이언트 키 검증 서비스 (캐시 포함)
 │   └── server/
 │       ├── server.go            ← HTTP 서버 생성 + 의존성 주입
 │       └── routes.go            ← 라우트 등록
@@ -258,7 +266,8 @@ ezai/
 │   ├── 001_create_provider_keys.sql
 │   ├── 002_create_key_audit_log.sql
 │   ├── 003_create_request_logs.sql
-│   └── 004_create_archived_logs.sql
+│   ├── 004_create_archived_logs.sql
+│   └── 005_create_client_keys.sql
 ├── data/                        ← DB 파일 (gitignore)
 │   ├── ezai.db                  ← 요청 로그 (SQLite)
 │   └── keys.db                  ← API 키 (SQLCipher 암호화)
@@ -276,7 +285,7 @@ ezai/
     │
     ▼
 [미들웨어 체인]
-  Recovery → RequestID → Logger → ClientID → Auth → RateLimit
+  Recovery → RequestID → Logger → Auth(키 쌍 검증) → RateLimit
     │
     ▼
 [ChatHandler]
@@ -324,12 +333,11 @@ database:
   keys_path: "data/keys.db"    # API 키 (SQLCipher 암호화)
 
 auth:
-  trusted_cidrs:               # 이 대역은 API 키 없이 접근 가능
+  trusted_cidrs:               # 이 대역은 인증 없이 접근 가능
     - "127.0.0.0/8"
     - "10.0.0.0/8"
     - "172.16.0.0/12"
     - "192.168.0.0/16"
-  api_key_header: "X-API-Key"
 
 providers:
   gemini:
@@ -388,6 +396,217 @@ providers:
 | gpt-4o-mini | 0.15 | 0.60 |
 | sonar-pro | 3.00 | 15.00 |
 | ollama/* | 0 | 0 |
+
+---
+
+## 클라이언트 인증
+
+ezai는 **키 쌍(client_id + secret)** 기반으로 외부 클라이언트를 인증한다.
+
+### 인증 구조
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                     ezai Gateway                        │
+│                                                         │
+│  신뢰 네트워크 (127.0.0.0/8, 10.0.0.0/8 등)            │
+│  → 인증 없이 모든 API 접근 가능                          │
+│  → admin API도 접근 가능                                 │
+│                                                         │
+│  외부 네트워크                                           │
+│  → X-Client-ID + X-Client-Secret 헤더 필수              │
+│  → admin API 접근 불가 (403 Forbidden)                   │
+│  → 셀프 로테이션 (/v1/keys/rotate)만 가능               │
+└─────────────────────────────────────────────────────────┘
+```
+
+- **client_id**: 서비스 식별자 (비밀 아님, 로그에 자유롭게 기록)
+- **secret**: `ezs_` 접두어 + 32바이트 랜덤 hex (총 68자). DB에는 SHA-256 해시만 저장되며, 발급 시 1회만 노출된다.
+- **만료(TTL)**: 키 발급 시 반드시 설정. 만료된 키로는 인증 불가.
+
+### 키 발급 (관리자)
+
+신뢰 네트워크(내부망)에서 관리자가 서비스별로 키를 발급한다.
+
+```bash
+# 모바일 앱용 키 발급 (720시간 = 30일)
+curl -X POST http://localhost:8080/admin/client-keys \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "mobile-app-prod",
+    "service_name": "mobile",
+    "description": "모바일 앱 프로덕션",
+    "ttl_hours": 720
+  }'
+```
+
+응답:
+
+```json
+{
+  "client_key": {
+    "id": 1,
+    "client_id": "mobile-app-prod",
+    "secret_prefix": "ezs_a3f1b2c4",
+    "service_name": "mobile",
+    "description": "모바일 앱 프로덕션",
+    "is_active": true,
+    "expires_at": "2026-05-17T14:30:00Z",
+    "created_at": "2026-04-17T14:30:00Z",
+    "updated_at": "2026-04-17T14:30:00Z"
+  },
+  "secret": "ezs_a3f1b2c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1",
+  "warning": "이 시크릿은 다시 확인할 수 없습니다. 안전한 곳에 보관하세요."
+}
+```
+
+> **중요**: `secret` 값은 이 응답에서만 확인할 수 있다. 분실 시 재발급이 필요하다.
+
+### 외부 클라이언트 사용
+
+발급받은 키 쌍을 헤더에 넣어 요청한다.
+
+```bash
+curl -X POST https://ezai.example.com/chat \
+  -H "Content-Type: application/json" \
+  -H "X-Client-ID: mobile-app-prod" \
+  -H "X-Client-Secret: ezs_a3f1b2c4d5e6f7..." \
+  -d '{
+    "provider": "gemini",
+    "model": "gemini-2.5-flash",
+    "messages": [{"role": "user", "content": "안녕하세요"}]
+  }'
+```
+
+인증 성공 시 모든 응답에 만료 정보 헤더가 포함된다:
+
+```
+X-Key-Expires-At: 2026-05-17T14:30:00Z
+X-Key-Expires-In: 2592000
+```
+
+`X-Key-Expires-In`은 남은 시간(초)이다. 클라이언트는 이 값을 확인하여 만료 전에 로테이션할 수 있다.
+
+### 셀프 로테이션
+
+클라이언트가 유효한 키로 직접 시크릿을 교체한다. client_id는 유지되고 secret만 바뀐다.
+
+```bash
+curl -X POST https://ezai.example.com/v1/keys/rotate \
+  -H "X-Client-ID: mobile-app-prod" \
+  -H "X-Client-Secret: ezs_현재시크릿..."
+```
+
+응답:
+
+```json
+{
+  "client_id": "mobile-app-prod",
+  "secret": "ezs_새로운시크릿...",
+  "expires_at": "2026-05-17T14:30:00Z",
+  "warning": "이 시크릿은 다시 확인할 수 없습니다. 안전한 곳에 보관하세요."
+}
+```
+
+> **참고**: 로테이션 시 만료일(`expires_at`)은 변경되지 않는다. 만료일 연장이 필요하면 관리자가 재발급해야 한다.
+
+클라이언트 측 로테이션 예시 (Python):
+
+```python
+import requests
+
+resp = requests.post("https://ezai.example.com/chat", headers={
+    "X-Client-ID": CLIENT_ID,
+    "X-Client-Secret": CLIENT_SECRET,
+}, json={...})
+
+# 만료 임박 시 자동 로테이션
+remaining = int(resp.headers.get("X-Key-Expires-In", 99999))
+if remaining < 86400:  # 1일 미만
+    rotate_resp = requests.post("https://ezai.example.com/v1/keys/rotate", headers={
+        "X-Client-ID": CLIENT_ID,
+        "X-Client-Secret": CLIENT_SECRET,
+    })
+    CLIENT_SECRET = rotate_resp.json()["secret"]
+```
+
+### 키 관리 (관리자)
+
+```bash
+# 전체 키 목록 조회
+curl http://localhost:8080/admin/client-keys
+
+# 서비스별 필터링
+curl "http://localhost:8080/admin/client-keys?service=mobile"
+
+# 키 폐기 (즉시 차단)
+curl -X DELETE http://localhost:8080/admin/client-keys/mobile-app-prod
+
+# 만료/폐기된 키 재발급 (새 시크릿 + 새 만료일)
+curl -X POST http://localhost:8080/admin/client-keys/mobile-app-prod/reissue \
+  -H "Content-Type: application/json" \
+  -d '{"ttl_hours": 720}'
+```
+
+### 키 생명주기
+
+```
+                관리자 발급
+                    │
+                    ▼
+              ┌──────────┐
+              │  활성(Active)  │◄──── 셀프 로테이션 (secret만 교체)
+              └──────────┘
+              │           │
+         만료됨         관리자 폐기
+              │           │
+              ▼           ▼
+         ┌─────────┐  ┌─────────┐
+         │ 만료     │  │ 비활성   │
+         └─────────┘  └─────────┘
+              │           │
+              └─────┬─────┘
+                    │
+               관리자 재발급
+                    │
+                    ▼
+              ┌──────────┐
+              │  활성(Active)  │
+              └──────────┘
+```
+
+- **활성 → 만료**: TTL 경과 시 자동. 클라이언트는 `X-Key-Expires-In` 헤더로 잔여 시간을 확인하여 만료 전에 로테이션 가능.
+- **활성 → 비활성**: 관리자가 `DELETE /admin/client-keys/:client_id`로 즉시 차단. 키 유출 시 사용.
+- **만료/비활성 → 활성**: 관리자가 `POST /admin/client-keys/:client_id/reissue`로 새 시크릿과 만료일을 재설정.
+- **셀프 로테이션**: 활성 상태에서만 가능. 만료일은 유지되고 secret만 교체.
+
+### 서비스별 키 분리
+
+각 서비스는 독립된 키를 가진다. 한 서비스의 키 변경이 다른 서비스에 영향을 주지 않는다.
+
+```bash
+# 서비스별 독립 키 발급
+curl -X POST http://localhost:8080/admin/client-keys \
+  -d '{"client_id": "mobile-app-prod", "service_name": "mobile", "ttl_hours": 720}'
+
+curl -X POST http://localhost:8080/admin/client-keys \
+  -d '{"client_id": "web-backend-prod", "service_name": "web", "ttl_hours": 720}'
+
+curl -X POST http://localhost:8080/admin/client-keys \
+  -d '{"client_id": "analytics-worker", "service_name": "analytics", "ttl_hours": 720}'
+```
+
+키 목록 조회 예시:
+
+```json
+{
+  "client_keys": [
+    {"client_id": "analytics-worker",  "secret_prefix": "ezs_c9e4...", "service_name": "analytics", "expires_at": "2026-05-17T..."},
+    {"client_id": "mobile-app-prod",   "secret_prefix": "ezs_a3f1...", "service_name": "mobile",    "expires_at": "2026-05-17T..."},
+    {"client_id": "web-backend-prod",  "secret_prefix": "ezs_b7d2...", "service_name": "web",       "expires_at": "2026-05-17T..."}
+  ]
+}
+```
 
 ---
 
@@ -651,7 +870,34 @@ curl http://localhost:8080/usage/pricing
 
 ## Admin API
 
-### API 키 관리
+> **접근 제한**: 모든 admin API(`/admin/*`)는 신뢰 네트워크(trusted CIDR)에서만 접근 가능하다. 외부 네트워크에서는 클라이언트 키가 있더라도 403 Forbidden이 반환된다.
+
+### 클라이언트 키 관리
+
+클라이언트 인증 키의 발급, 조회, 폐기, 재발급을 관리한다. 자세한 사용법은 [클라이언트 인증](#클라이언트-인증) 섹션을 참고한다.
+
+```bash
+# 키 발급
+curl -X POST http://localhost:8080/admin/client-keys \
+  -H "Content-Type: application/json" \
+  -d '{"client_id": "my-service", "service_name": "backend", "ttl_hours": 720}'
+
+# 키 목록 조회
+curl http://localhost:8080/admin/client-keys
+
+# 서비스별 필터링
+curl "http://localhost:8080/admin/client-keys?service=backend"
+
+# 키 폐기
+curl -X DELETE http://localhost:8080/admin/client-keys/my-service
+
+# 만료/폐기 키 재발급
+curl -X POST http://localhost:8080/admin/client-keys/my-service/reissue \
+  -H "Content-Type: application/json" \
+  -d '{"ttl_hours": 720}'
+```
+
+### 프로바이더 API 키 관리
 
 ```bash
 # 키 목록 (값은 노출되지 않음)

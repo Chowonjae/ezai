@@ -101,9 +101,10 @@ func runServe() {
 
 	logWriter := store.NewRequestLogWriter(logsDB, logger, 1000)
 
-	// 암호화 DB (provider_keys)
+	// 암호화 DB (provider_keys + client_keys)
 	var keyStore *store.KeyStore
 	var auditLog *store.AuditLog
+	var clientKeyStore *store.ClientKeyStore
 	dbKey := os.Getenv("EZAI_DB_KEY")
 	if dbKey != "" {
 		encryptor, err := crypto.NewEncryptor(dbKey)
@@ -117,13 +118,14 @@ func runServe() {
 		defer keysDB.Close()
 
 		if err := store.RunMigrations(keysDB, migrationsDir, func(name string) bool {
-			return strings.HasPrefix(name, "001_") || strings.HasPrefix(name, "002_")
+			return strings.HasPrefix(name, "001_") || strings.HasPrefix(name, "002_") || strings.HasPrefix(name, "005_")
 		}); err != nil {
 			logger.Fatal("키 DB 마이그레이션 실패", zap.Error(err))
 		}
 
 		keyStore = store.NewKeyStore(keysDB, encryptor)
 		auditLog = store.NewAuditLog(keysDB)
+		clientKeyStore = store.NewClientKeyStore(keysDB)
 		logger.Info("키 DB 초기화 완료 (암호화)", zap.String("path", cfg.Database.KeysPath))
 	} else {
 		logger.Warn("EZAI_DB_KEY 미설정: 키 관리 기능 비활성화")
@@ -226,6 +228,7 @@ func runServe() {
 		Consumer:        consumer,
 		UsageAdmin:      usageAdmin,
 		RetentionConfig: retentionCfg,
+		ClientKeyStore:  clientKeyStore,
 	})
 
 	go func() {
@@ -523,7 +526,7 @@ func openKeyStore() (*store.KeyStore, *store.AuditLog) {
 	// 마이그레이션
 	migrationsDir := "migrations"
 	if err := store.RunMigrations(keysDB, migrationsDir, func(name string) bool {
-		return strings.HasPrefix(name, "001_") || strings.HasPrefix(name, "002_")
+		return strings.HasPrefix(name, "001_") || strings.HasPrefix(name, "002_") || strings.HasPrefix(name, "005_")
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "마이그레이션 실패: %v\n", err)
 		os.Exit(1)

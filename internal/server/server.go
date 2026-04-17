@@ -17,6 +17,7 @@ import (
 	"github.com/Chowonjae/ezai/internal/provider"
 	"github.com/Chowonjae/ezai/internal/queue"
 	"github.com/Chowonjae/ezai/internal/router"
+	"github.com/Chowonjae/ezai/internal/service"
 	"github.com/Chowonjae/ezai/internal/store"
 )
 
@@ -49,6 +50,7 @@ type Deps struct {
 	Consumer        *queue.Consumer
 	UsageAdmin      *store.UsageAdmin
 	RetentionConfig *config.RetentionConfig
+	ClientKeyStore  *store.ClientKeyStore
 }
 
 // New - 서버 생성
@@ -56,17 +58,22 @@ func New(d Deps) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
 
-	// 미들웨어 체인: Recovery → RequestID → Logger → ClientID → Auth → RateLimit
+	// ClientKeyValidator 구성
+	var clientKeyValidator *service.ClientKeyService
+	authCfg := middleware.AuthConfig{
+		TrustedCIDRs: d.Config.Auth.TrustedCIDRs,
+	}
+	if d.ClientKeyStore != nil {
+		clientKeyValidator = service.NewClientKeyService(d.ClientKeyStore, d.Redis)
+		authCfg.Validator = clientKeyValidator
+	}
+
+	// 미들웨어 체인: Recovery → RequestID → Logger → Auth
 	engine.Use(
 		middleware.Recovery(d.Logger),
 		middleware.RequestID(),
 		middleware.Logger(d.Logger),
-		middleware.ClientID(),
-		middleware.Auth(middleware.AuthConfig{
-			TrustedCIDRs: d.Config.Auth.TrustedCIDRs,
-			APIKeyHeader: d.Config.Auth.APIKeyHeader,
-			ValidateKey:  nil,
-		}, d.Logger),
+		middleware.Auth(authCfg, d.Logger),
 	)
 
 	// Redis Rate Limiting (Redis가 설정된 경우)
@@ -121,6 +128,14 @@ func New(d Deps) *Server {
 		adminHandler = handler.NewAdminHandler(d.KeyStore, d.AuditLog, logReader, d.Logger)
 	}
 
+	// 클라이언트 키 관리 핸들러
+	var clientKeyAdminHandler *handler.ClientKeyAdminHandler
+	var clientKeyRotateHandler *handler.ClientKeyRotateHandler
+	if d.ClientKeyStore != nil && d.AuditLog != nil {
+		clientKeyAdminHandler = handler.NewClientKeyAdminHandler(d.ClientKeyStore, d.AuditLog, clientKeyValidator, d.Logger)
+		clientKeyRotateHandler = handler.NewClientKeyRotateHandler(d.ClientKeyStore, d.AuditLog, clientKeyValidator, d.Logger)
+	}
+
 	// Usage Admin 핸들러 (아카이브, 리셋, 삭제)
 	var usageAdminHandler *handler.UsageAdminHandler
 	if d.UsageAdmin != nil && d.RetentionConfig != nil {
@@ -128,7 +143,20 @@ func New(d Deps) *Server {
 	}
 
 	// 라우트 등록
-	registerRoutes(engine, chatHandler, healthHandler, modelsHandler, streamHandler, batchHandler, usageHandler, adminHandler, usageAdminHandler)
+	registerRoutes(engine, routesDeps{
+		chatHandler:            chatHandler,
+		healthHandler:          healthHandler,
+		modelsHandler:          modelsHandler,
+		streamHandler:          streamHandler,
+		batchHandler:           batchHandler,
+		usageHandler:           usageHandler,
+		adminHandler:           adminHandler,
+		usageAdminHandler:      usageAdminHandler,
+		clientKeyAdminHandler:  clientKeyAdminHandler,
+		clientKeyRotateHandler: clientKeyRotateHandler,
+		trustedCIDRs:           d.Config.Auth.TrustedCIDRs,
+		logger:                 d.Logger,
+	})
 
 	httpServer := &http.Server{
 		Addr:         d.Config.Server.Addr(),
