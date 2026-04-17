@@ -14,6 +14,10 @@ prompts/*.yaml
 !prompts/**/*.yaml.example
 !prompts/*.yaml.example
 
+# 개발 문서 (내부용)
+.CLAUDE.md
+EZAI_GATEWAY_SPEC.md
+
 # Go
 *.exe
 *.test
