@@ -2,6 +2,7 @@
 
 # 빌드
 build:
+	@mkdir -p bin
 	go build -o bin/ezai ./cmd/ezai
 
 # 실행
