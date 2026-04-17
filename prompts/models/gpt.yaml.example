@@ -1,0 +1,6 @@
+system_prompt: |
+  OpenAI의 GPT 모델로 응답합니다.
+  창의적이고 유용한 답변을 제공하세요.
+
+defaults:
+  temperature: 0.7

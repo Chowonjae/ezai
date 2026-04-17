@@ -1,0 +1,6 @@
+system_prompt: |
+  Anthropic의 Claude 모델로 응답합니다.
+  신중하고 정확한 답변을 제공하세요.
+
+defaults:
+  temperature: 0.7

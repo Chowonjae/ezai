@@ -1,0 +1,15 @@
+task_prompt: |
+  다음 텍스트를 분류하세요.
+  반드시 JSON 형식으로 응답하세요.
+
+  분류 카테고리: {{categories}}
+
+  입력:
+  {{input}}
+
+  응답 형식:
+  {"category": "분류 결과", "confidence": 0.0~1.0, "reason": "분류 사유"}
+
+defaults:
+  temperature: 0.1
+  max_tokens: 512

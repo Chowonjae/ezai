@@ -1,0 +1,21 @@
+circuit_breaker:
+  failure_threshold: 5         # 연속 5회 실패 시 차단
+  recovery_timeout_sec: 60     # 60초 후 복구 테스트
+  half_open_requests: 3        # 복구 테스트 요청 수
+
+providers:
+  gemini:
+    max_concurrent: 30
+    timeout_ms: 30000
+  claude:
+    max_concurrent: 20
+    timeout_ms: 30000
+  gpt:
+    max_concurrent: 30
+    timeout_ms: 30000
+  ollama:
+    max_concurrent: 5
+    timeout_ms: 60000
+  perplexity:
+    max_concurrent: 10
+    timeout_ms: 30000

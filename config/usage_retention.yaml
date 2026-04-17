@@ -1,0 +1,21 @@
+# 비용/로그 보존 정책
+retention:
+  # 상세 로그 (요청별 기록)
+  detail_logs:
+    hot_storage_days: 90        # 최근 90일은 DB에 보관 (빠른 조회)
+    archive_after_days: 90      # 90일 이후 아카이브 스토리지로 이동
+    delete_after_days: 365      # 365일 이후 완전 삭제 (0이면 영구 보관)
+
+  # 집계 데이터 (일별/월별 요약)
+  aggregated:
+    daily_keep_days: 365        # 일별 요약은 1년 보관
+    monthly_keep_years: 5       # 월별 요약은 5년 보관
+    yearly_keep_years: 0        # 연별 요약은 영구 보관
+
+  # 초기화 API 접근 제어
+  reset:
+    require_confirmation: true   # "CONFIRM-DELETE-2026-04" 같은 확인 문자열 요구
+    allowed_operations:
+      - soft_reset               # 집계 카운터 리셋
+      - archive                  # 아카이브로 이동
+      # - hard_delete            # 기본 비활성화, 필요 시 명시적 활성화

@@ -1,0 +1,10 @@
+task_prompt: |
+  다음 텍스트를 {{length}}자 이내로 요약하세요.
+  핵심 내용을 빠짐없이 포함하고, 불필요한 수식어는 제거하세요.
+
+  입력:
+  {{input}}
+
+defaults:
+  temperature: 0.3
+  max_tokens: 1024

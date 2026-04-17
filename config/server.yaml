@@ -1,0 +1,40 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+  read_timeout_sec: 30
+  write_timeout_sec: 120      # 스트리밍 응답 고려
+  shutdown_timeout_sec: 30
+
+redis:
+  addr: "localhost:6379"
+  password: ""
+  db: 0
+  pool_size: 20
+
+database:
+  logs_path: "data/ezai.db"   # request_logs용 일반 SQLite
+  keys_path: "data/keys.db"   # provider_keys용 암호화 SQLite
+
+auth:
+  trusted_cidrs:               # 신뢰 네트워크 (인증 없이 접근)
+    - "127.0.0.0/8"
+    - "::1/128"
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+  api_key_header: "X-API-Key"
+
+providers:
+  gemini:
+    enabled: true
+    location: "us-central1"    # Vertex AI 리전
+  claude:
+    enabled: true
+  gpt:
+    enabled: true
+  perplexity:
+    enabled: true
+    base_url: "https://api.perplexity.ai"
+  ollama:
+    enabled: true
+    base_url: "http://localhost:11434/v1"

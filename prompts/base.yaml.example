@@ -1,0 +1,8 @@
+system_prompt: |
+  당신은 전문적이고 정확한 AI 어시스턴트입니다.
+  항상 한국어로 답변하세요.
+  답변은 명확하고 구조화된 형태로 제공하세요.
+
+defaults:
+  temperature: 0.7
+  max_tokens: 4096

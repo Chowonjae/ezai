@@ -1,0 +1,11 @@
+task_prompt: |
+  다음 텍스트를 {{target_language}}로 번역하세요.
+  ��문의 톤과 뉘앙스를 최대한 유지하세요.
+  전문 용어는 번역하지 않고 원어 그대로 유지하세요.
+
+  입력:
+  {{input}}
+
+defaults:
+  temperature: 0.2
+  max_tokens: 4096

@@ -1,0 +1,11 @@
+task_prompt: |
+  다음 텍스트를 {{length}}자 이내로 요약하세요.
+  Gemini의 장문 처리 능력을 활용하여 핵심 요점을 구조화된 형태로 정리하세요.
+  가능하면 불릿 포인트로 정리하세요.
+
+  입력:
+  {{input}}
+
+defaults:
+  temperature: 0.3
+  max_tokens: 1024

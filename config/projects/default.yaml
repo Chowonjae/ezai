@@ -1,0 +1,11 @@
+fallback:
+  default_chain:
+    - provider: gemini
+      model: gemini-2.5-flash
+    - provider: claude
+      model: claude-sonnet-4-6
+    - provider: gpt
+      model: gpt-4o
+  policy: on_error              # on_error | on_timeout | on_rate_limit | always_fastest
+  timeout_ms: 10000             # 이 시간 초과 시 다음 모델로
+  max_retries: 1                # 같은 모델 재시도 횟수
