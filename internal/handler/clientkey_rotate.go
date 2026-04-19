@@ -81,7 +81,8 @@ func (h *ClientKeyRotateHandler) Rotate(c *gin.Context) {
 
 	// 시크릿만 교체 (만료일은 유지)
 	if err := h.store.RotateSecret(clientID, secretHash, secretPrefix); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		h.logger.Error("시크릿 교체 실패", zap.String("client_id", clientID), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "시크릿 교체 실패"})
 		return
 	}
 

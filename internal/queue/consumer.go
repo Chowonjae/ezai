@@ -126,15 +126,16 @@ func (c *Consumer) processItem(ctx context.Context, itemJSON string) {
 	if err := json.Unmarshal([]byte(item.Request), &req); err != nil {
 		c.logger.Error("요청 파싱 실패", zap.String("job_id", item.JobID), zap.Error(err))
 		// 파싱 실패한 Job도 failed 상태로 갱신하여 영원히 pending에 빠지지 않도록 함
-		c.failJob(ctx, item.JobID, time.Now().UTC(), err)
+		c.failJob(ctx, item.JobID, "", time.Now().UTC(), err)
 		return
 	}
 
 	c.logger.Info("배치 처리 시작", zap.String("job_id", item.JobID), zap.String("provider", req.Provider))
 
-	// 원래 생성 시각 보존 + 중복 처리 방지
+	// 원래 생성 시각/소유자 보존 + 중복 처리 방지
 	existing, err := c.jobStore.Get(ctx, item.JobID)
 	createdAt := time.Now().UTC()
+	var ownerClientID string
 	if err == nil && existing != nil {
 		// 이미 완료/실패한 Job은 중복 처리 방지
 		if existing.Status == model.JobCompleted || existing.Status == model.JobFailed {
@@ -143,6 +144,7 @@ func (c *Consumer) processItem(ctx context.Context, itemJSON string) {
 			return
 		}
 		createdAt = existing.CreatedAt
+		ownerClientID = existing.ClientID
 	}
 
 	// 상태: processing (추적 Set에도 등록)
@@ -166,7 +168,7 @@ func (c *Consumer) processItem(ctx context.Context, itemJSON string) {
 			)
 			select {
 			case <-ctx.Done():
-				c.failJob(ctx, item.JobID, createdAt, lastErr)
+				c.failJob(ctx, item.JobID, ownerClientID, createdAt, lastErr)
 				return
 			case <-time.After(backoff):
 			}
@@ -179,7 +181,7 @@ func (c *Consumer) processItem(ctx context.Context, itemJSON string) {
 			var p provider.Provider
 			p, err = c.registry.Get(req.Provider)
 			if err != nil {
-				c.failJob(ctx, item.JobID, createdAt, err)
+				c.failJob(ctx, item.JobID, ownerClientID, createdAt, err)
 				return
 			}
 			resp, err = p.Chat(ctx, &req)
@@ -193,13 +195,13 @@ func (c *Consumer) processItem(ctx context.Context, itemJSON string) {
 
 		// 재시도 불가능한 에러 (잘못된 요청 등)는 즉시 실패
 		if !isRetryableError(err) {
-			c.failJob(ctx, item.JobID, createdAt, err)
+			c.failJob(ctx, item.JobID, ownerClientID, createdAt, err)
 			return
 		}
 	}
 
 	if resp == nil {
-		c.failJob(ctx, item.JobID, createdAt, lastErr)
+		c.failJob(ctx, item.JobID, ownerClientID, createdAt, lastErr)
 		return
 	}
 
@@ -207,6 +209,7 @@ func (c *Consumer) processItem(ctx context.Context, itemJSON string) {
 	now := time.Now().UTC()
 	job := &model.BatchJob{
 		JobID:     item.JobID,
+		ClientID:  ownerClientID,
 		Status:    model.JobCompleted,
 		Request:   &req,
 		Response:  resp,
@@ -223,11 +226,12 @@ func (c *Consumer) processItem(ctx context.Context, itemJSON string) {
 }
 
 // failJob - Job 실패 처리
-func (c *Consumer) failJob(ctx context.Context, jobID string, createdAt time.Time, err error) {
+func (c *Consumer) failJob(ctx context.Context, jobID, clientID string, createdAt time.Time, err error) {
 	errStr := err.Error()
 	now := time.Now().UTC()
 	job := &model.BatchJob{
 		JobID:     jobID,
+		ClientID:  clientID,
 		Status:    model.JobFailed,
 		Error:     &errStr,
 		CreatedAt: createdAt,
@@ -295,7 +299,14 @@ func (c *Consumer) reaper(ctx context.Context) {
 					zap.String("job_id", jobID),
 					zap.Duration("threshold", staleThreshold),
 				)
-				c.failJob(ctx, jobID, time.Time{}, fmt.Errorf("processing 타임아웃 (%s 초과)", staleThreshold))
+				// 기존 Job에서 소유자/생성시각 보존
+				var clientID string
+				var createdAt time.Time
+				if existing, err := c.jobStore.Get(ctx, jobID); err == nil && existing != nil {
+					clientID = existing.ClientID
+					createdAt = existing.CreatedAt
+				}
+				c.failJob(ctx, jobID, clientID, createdAt, fmt.Errorf("processing 타임아웃 (%s 초과)", staleThreshold))
 			}
 		}
 	}

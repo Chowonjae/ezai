@@ -64,8 +64,9 @@ func (h *BatchHandler) Submit(c *gin.Context) {
 
 	jobID, err := h.producer.Enqueue(c.Request.Context(), &req, clientID)
 	if err != nil {
+		h.logger.Error("배치 등록 실패", zap.String("trace_id", traceID), zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "배치 등록 실패: " + err.Error(),
+			"error": "배치 등록 실패",
 		})
 		return
 	}

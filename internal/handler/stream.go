@@ -252,8 +252,10 @@ func (h *StreamHandler) Stream(c *gin.Context) {
 
 		streamCh, err := p.ChatStream(c.Request.Context(), &req)
 		if err != nil {
+			h.logger.Error("스트리밍 시작 실패", zap.String("trace_id", traceID), zap.Error(err))
 			c.JSON(http.StatusBadGateway, gin.H{
-				"error": "스트리밍 시작 실패: " + err.Error(),
+				"error":    "스트리밍 시작 실패",
+				"trace_id": traceID,
 			})
 			return
 		}
