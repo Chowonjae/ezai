@@ -170,31 +170,52 @@ func (g *GeminiProvider) ChatStream(ctx context.Context, req *model.ChatRequest)
 
 	go func() {
 		defer close(ch)
+		doneSent := false
 		for result, err := range g.client.Models.GenerateContentStream(ctx, req.Model, contents, genConfig) {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
 			if err != nil {
 				errMsg := err.Error()
-				ch <- model.StreamChunk{Error: &errMsg, Done: true}
+				select {
+				case ch <- model.StreamChunk{Error: &errMsg, Done: true}:
+				case <-ctx.Done():
+				}
 				return
 			}
 			text := extractGeminiText(result)
 			if text != "" {
-				ch <- model.StreamChunk{Content: text}
+				select {
+				case ch <- model.StreamChunk{Content: text}:
+				case <-ctx.Done():
+					return
+				}
 			}
-			// 마지막 청크에 사용량 정보 포함
 			if result.UsageMetadata != nil && result.UsageMetadata.CandidatesTokenCount > 0 {
-				ch <- model.StreamChunk{
+				select {
+				case ch <- model.StreamChunk{
 					Done: true,
 					Usage: &model.UsageInfo{
 						InputTokens:  int(result.UsageMetadata.PromptTokenCount),
 						OutputTokens: int(result.UsageMetadata.CandidatesTokenCount),
 						TotalTokens:  int(result.UsageMetadata.TotalTokenCount),
 					},
+				}:
+				case <-ctx.Done():
 				}
+				doneSent = true
 				return
 			}
 		}
-		// 이터레이터 정상 종료
-		ch <- model.StreamChunk{Done: true}
+		if !doneSent {
+			select {
+			case ch <- model.StreamChunk{Done: true}:
+			case <-ctx.Done():
+			}
+		}
 	}()
 
 	return ch, nil

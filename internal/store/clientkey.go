@@ -2,9 +2,13 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
+
+// ErrKeyNotFound - 키를 찾을 수 없을 때 반환하는 sentinel error
+var ErrKeyNotFound = errors.New("키를 찾을 수 없습니다")
 
 // ClientKey - client_keys 테이블 행
 type ClientKey struct {
@@ -137,7 +141,7 @@ func (s *ClientKeyStore) RotateSecret(clientID, newSecretHash, newSecretPrefix s
 		return fmt.Errorf("RowsAffected 조회 실패: %w", err)
 	}
 	if rows == 0 {
-		return fmt.Errorf("활성 키를 찾을 수 없습니다: %s", clientID)
+		return fmt.Errorf("%w (활성 상태): %s", ErrKeyNotFound, clientID)
 	}
 	return nil
 }
@@ -157,7 +161,7 @@ func (s *ClientKeyStore) Deactivate(clientID string) error {
 		return fmt.Errorf("RowsAffected 조회 실패: %w", err)
 	}
 	if rows == 0 {
-		return fmt.Errorf("키를 찾을 수 없습니다: %s", clientID)
+		return fmt.Errorf("%w: %s", ErrKeyNotFound, clientID)
 	}
 	return nil
 }
@@ -179,7 +183,7 @@ func (s *ClientKeyStore) Reissue(clientID, newSecretHash, newSecretPrefix string
 		return fmt.Errorf("RowsAffected 조회 실패: %w", err)
 	}
 	if rows == 0 {
-		return fmt.Errorf("키를 찾을 수 없습니다: %s", clientID)
+		return fmt.Errorf("%w: %s", ErrKeyNotFound, clientID)
 	}
 	return nil
 }

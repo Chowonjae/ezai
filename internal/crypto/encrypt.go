@@ -26,6 +26,10 @@ func NewEncryptor(hexKey string) (*Encryptor, error) {
 	}
 
 	block, err := aes.NewCipher(key)
+	// 키 바이트를 메모리에서 즉시 삭제 (힙 덤프/코어 덤프 시 노출 방지)
+	for i := range key {
+		key[i] = 0
+	}
 	if err != nil {
 		return nil, fmt.Errorf("AES 블록 생성 실패: %w", err)
 	}

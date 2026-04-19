@@ -2,12 +2,35 @@ package handler
 
 import (
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/Chowonjae/ezai/internal/config"
 	"github.com/Chowonjae/ezai/internal/store"
 )
+
+// validateDateParam - YYYY-MM-DD 형식의 날짜 파라미터 검증
+// 빈 문자열은 허용 (선택 파라미터)
+func validateDateParam(date, paramName string) (string, error) {
+	if date == "" {
+		return "", nil
+	}
+	if _, err := time.Parse("2006-01-02", date); err != nil {
+		return "", &paramError{param: paramName, msg: "날짜 형식이 올바르지 않습니다 (YYYY-MM-DD)"}
+	}
+	return date, nil
+}
+
+type paramError struct {
+	param string
+	msg   string
+}
+
+func (e *paramError) Error() string {
+	return e.param + ": " + e.msg
+}
 
 // UsageHandler - 비용/사용량 조회 핸들러
 type UsageHandler struct {
@@ -26,6 +49,18 @@ func NewUsageHandler(usageReader *store.UsageReader, pricingManager *config.Pric
 // Usage - GET /usage
 // 기간별, 프로바이더별, 모델별 비용/사용량 집계를 반환한다.
 func (h *UsageHandler) Usage(c *gin.Context) {
+	// 날짜 파라미터 검증
+	for _, p := range []struct{ value, name string }{
+		{c.Query("date"), "date"},
+		{c.Query("from"), "from"},
+		{c.Query("to"), "to"},
+	} {
+		if _, err := validateDateParam(p.value, p.name); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
 	q := store.UsageQuery{
 		Period:   c.DefaultQuery("period", "daily"),
 		Date:     c.Query("date"),
@@ -42,9 +77,12 @@ func (h *UsageHandler) Usage(c *gin.Context) {
 
 	result, err := h.usageReader.Query(q)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "사용량 조회 실패: " + err.Error(),
-		})
+		// group_by 검증 에러는 400, 나머지는 500
+		if strings.Contains(err.Error(), "유효하지 않은 group_by") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "사용량 조회 실패: " + err.Error()})
+		}
 		return
 	}
 

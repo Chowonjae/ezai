@@ -13,12 +13,12 @@ const TraceIDKey = "trace_id"
 
 // RequestID - trace_id 생성 미들웨어
 // 모든 요청에 고유 trace_id를 부여하고, 컨텍스트와 응답 헤더에 주입한다.
-// 형식: tr_YYYYMMDD_HHMMSS_{uuid_short}
+// 형식: tr_YYYYMMDD_HHMMSS_{uuid}
 func RequestID() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		now := time.Now().UTC()
-		short := uuid.New().String()[:8]
-		traceID := fmt.Sprintf("tr_%s_%s", now.Format("20060102_150405"), short)
+		id := uuid.New().String()
+		traceID := fmt.Sprintf("tr_%s_%s", now.Format("20060102_150405"), id)
 
 		c.Set(TraceIDKey, traceID)
 		c.Header("X-Trace-ID", traceID)

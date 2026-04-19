@@ -49,4 +49,4 @@ CREATE INDEX IF NOT EXISTS idx_logs_client ON request_logs(client_id, timestamp)
 CREATE INDEX IF NOT EXISTS idx_logs_provider ON request_logs(actual_provider, timestamp);
 CREATE INDEX IF NOT EXISTS idx_logs_project ON request_logs(project, timestamp);
 CREATE INDEX IF NOT EXISTS idx_logs_status ON request_logs(status, timestamp);
-CREATE INDEX IF NOT EXISTS idx_logs_trace ON request_logs(trace_id);
+-- trace_id는 UNIQUE 제약이 이미 인덱스를 생성하므로 별도 인덱스 불필요

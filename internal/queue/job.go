@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -10,6 +11,9 @@ import (
 
 	"github.com/Chowonjae/ezai/internal/model"
 )
+
+// ErrJobNotFound - Job을 찾을 수 없을 때 반환하는 sentinel error
+var ErrJobNotFound = errors.New("Job을 찾을 수 없습니다")
 
 const (
 	jobKeyPrefix = "ezai:batch:job:"  // Redis Hash 키 접두사
@@ -63,7 +67,7 @@ func (js *JobStore) Get(ctx context.Context, jobID string) (*model.BatchJob, err
 		return nil, fmt.Errorf("Job 조회 실패: %w", err)
 	}
 	if len(vals) == 0 {
-		return nil, fmt.Errorf("Job '%s'을(를) 찾을 수 없습니다", jobID)
+		return nil, fmt.Errorf("%w: %s", ErrJobNotFound, jobID)
 	}
 
 	job := &model.BatchJob{

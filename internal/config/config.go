@@ -55,11 +55,12 @@ type FallbackChainEntry struct {
 
 // ServerConfig - HTTP 서버 설정
 type ServerConfig struct {
-	Host              string `yaml:"host"`
-	Port              int    `yaml:"port"`
-	ReadTimeoutSec    int    `yaml:"read_timeout_sec"`
-	WriteTimeoutSec   int    `yaml:"write_timeout_sec"`
-	ShutdownTimeoutSec int   `yaml:"shutdown_timeout_sec"`
+	Host                  string `yaml:"host"`
+	Port                  int    `yaml:"port"`
+	ReadTimeoutSec        int    `yaml:"read_timeout_sec"`
+	WriteTimeoutSec       int    `yaml:"write_timeout_sec"`
+	StreamWriteTimeoutSec int    `yaml:"stream_write_timeout_sec"` // SSE 스트리밍 전용 (기본 600초)
+	ShutdownTimeoutSec    int    `yaml:"shutdown_timeout_sec"`
 }
 
 // RedisConfig - Redis 연결 설정
@@ -116,6 +117,9 @@ func Load(configDir string) (*Config, error) {
 	}
 	if cfg.Server.WriteTimeoutSec == 0 {
 		cfg.Server.WriteTimeoutSec = 120
+	}
+	if cfg.Server.StreamWriteTimeoutSec == 0 {
+		cfg.Server.StreamWriteTimeoutSec = 600 // SSE 스트리밍: 기본 10분
 	}
 	if cfg.Server.ShutdownTimeoutSec == 0 {
 		cfg.Server.ShutdownTimeoutSec = 30

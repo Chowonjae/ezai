@@ -1,7 +1,6 @@
 package router
 
 import (
-	"net/http"
 	"strings"
 )
 
@@ -51,15 +50,35 @@ func shouldFallback(policy string, err error) bool {
 }
 
 // isServerError - 5xx 서버 에러 여부
+// HTTP 상태코드 텍스트로 매칭하여 숫자만으로 인한 오탐(토큰 수, 요청 ID 등)을 방지한다.
 func isServerError(errMsg string) bool {
-	serverCodes := []string{"500", "502", "503", "504"}
-	for _, code := range serverCodes {
-		if strings.Contains(errMsg, code) {
+	lower := strings.ToLower(errMsg)
+	return strings.Contains(lower, "internal server error") ||
+		strings.Contains(lower, "bad gateway") ||
+		strings.Contains(lower, "service unavailable") ||
+		strings.Contains(lower, "gateway timeout") ||
+		containsStatusCode(errMsg, "500") ||
+		containsStatusCode(errMsg, "502") ||
+		containsStatusCode(errMsg, "503") ||
+		containsStatusCode(errMsg, "504")
+}
+
+// containsStatusCode - "status: CODE" 또는 ": CODE" 패턴으로 HTTP 상태코드를 매칭
+// 단순 숫자 서브스트링 매칭의 오탐을 방지한다.
+func containsStatusCode(errMsg, code string) bool {
+	patterns := []string{
+		"status: " + code,
+		"status:" + code,
+		"status code: " + code,
+		"status_code: " + code,
+		code + " ",
+	}
+	for _, p := range patterns {
+		if strings.Contains(errMsg, p) {
 			return true
 		}
 	}
-	return strings.Contains(errMsg, http.StatusText(http.StatusInternalServerError)) ||
-		strings.Contains(errMsg, "Service Unavailable")
+	return false
 }
 
 // isNetworkError - 네트워크 에러 여부
@@ -82,16 +101,17 @@ func isNetworkError(errMsg string) bool {
 }
 
 // isTimeoutError - 타임아웃 에러 여부
+// 주의: "context canceled"는 클라이언트 연결 끊김이므로 타임아웃이 아님 (fallback 불필요)
 func isTimeoutError(errMsg string) bool {
 	lower := strings.ToLower(errMsg)
 	return strings.Contains(lower, "timeout") ||
-		strings.Contains(lower, "deadline exceeded") ||
-		strings.Contains(lower, "context canceled")
+		strings.Contains(lower, "deadline exceeded")
 }
 
 // isRateLimitError - 429 Rate Limit 에러 여부
 func isRateLimitError(errMsg string) bool {
-	return strings.Contains(errMsg, "429") ||
-		strings.Contains(strings.ToLower(errMsg), "rate limit") ||
-		strings.Contains(strings.ToLower(errMsg), "too many requests")
+	lower := strings.ToLower(errMsg)
+	return containsStatusCode(errMsg, "429") ||
+		strings.Contains(lower, "rate limit") ||
+		strings.Contains(lower, "too many requests")
 }

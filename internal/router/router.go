@@ -3,7 +3,6 @@ package router
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -30,12 +29,14 @@ func NewRouter(registry *provider.Registry, fbCfg *config.FallbackGlobalConfig, 
 
 	if fbCfg != nil {
 		for name, pCfg := range fbCfg.Providers {
-			breakers[name] = NewCircuitBreaker(
+			cb := NewCircuitBreaker(
 				name,
 				fbCfg.CircuitBreaker.FailureThreshold,
 				fbCfg.CircuitBreaker.RecoveryTimeoutSec,
 				fbCfg.CircuitBreaker.HalfOpenRequests,
 			)
+			cb.SetLogger(logger)
+			breakers[name] = cb
 			semaphores[name] = concurrency.NewSemaphore(name, pCfg.MaxConcurrent)
 		}
 	}
@@ -88,6 +89,11 @@ func (r *Router) executeSequential(ctx context.Context, req *model.ChatRequest, 
 		}
 
 		lastErr = err
+
+		// 클라이언트 연결 끊김(context canceled) 시 fallback 중단
+		if ctx.Err() != nil {
+			return nil, attempts, err
+		}
 
 		// fallback 여부 판정 (circuit_open, provider_not_found는 항상 다음으로)
 		if attempt.Status == "circuit_open" || attempt.Status == "provider_not_found" {
@@ -183,6 +189,8 @@ func (r *Router) tryProvider(ctx context.Context, req *model.ChatRequest, target
 }
 
 // executeFastest - 모든 대상에 동시 요청, 첫 성공 반환
+// 각 goroutine에서 Circuit Breaker/세마포어/타임아웃을 적용하고,
+// 첫 성공 반환 후 나머지 결과를 백그라운드에서 drain한다.
 func (r *Router) executeFastest(ctx context.Context, req *model.ChatRequest, targets []model.FallbackTarget) (*model.ChatResponse, []FallbackAttempt, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -203,12 +211,42 @@ func (r *Router) executeFastest(ctx context.Context, req *model.ChatRequest, tar
 				Model:    t.Model,
 			}
 
+			// Circuit Breaker 확인
+			if cb, ok := r.breakers[t.Provider]; ok {
+				if !cb.Allow() {
+					attempt.Status = "circuit_open"
+					attempt.Error = fmt.Sprintf("프로바이더 '%s' Circuit Breaker 열림", t.Provider)
+					ch <- result{attempt: attempt, err: fmt.Errorf("%s", attempt.Error)}
+					return
+				}
+			}
+
+			// 프로바이더 조회
 			p, err := r.registry.Get(t.Provider)
 			if err != nil {
-				attempt.Status = "error"
+				attempt.Status = "provider_not_found"
 				attempt.Error = err.Error()
 				ch <- result{attempt: attempt, err: err}
 				return
+			}
+
+			// 세마포어 획득
+			if sem, ok := r.semaphores[t.Provider]; ok {
+				if err := sem.Acquire(ctx); err != nil {
+					attempt.Status = "timeout"
+					attempt.Error = "세마포어 획득 타임아웃"
+					ch <- result{attempt: attempt, err: err}
+					return
+				}
+				defer sem.Release()
+			}
+
+			// 프로바이더별 타임아웃 적용
+			provCtx := ctx
+			if timeoutMs, ok := r.getProviderTimeout(t.Provider); ok {
+				var provCancel context.CancelFunc
+				provCtx, provCancel = context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
+				defer provCancel()
 			}
 
 			provReq := *req
@@ -216,8 +254,17 @@ func (r *Router) executeFastest(ctx context.Context, req *model.ChatRequest, tar
 			provReq.Model = t.Model
 
 			start := time.Now()
-			resp, err := p.Chat(ctx, &provReq)
+			resp, err := p.Chat(provCtx, &provReq)
 			attempt.LatencyMs = time.Since(start).Milliseconds()
+
+			// Circuit Breaker 결과 기록
+			if cb, ok := r.breakers[t.Provider]; ok {
+				if err != nil {
+					cb.RecordFailure()
+				} else {
+					cb.RecordSuccess()
+				}
+			}
 
 			if err != nil {
 				attempt.Status = "error"
@@ -231,19 +278,29 @@ func (r *Router) executeFastest(ctx context.Context, req *model.ChatRequest, tar
 		}(i+1, target)
 	}
 
-	// 결과 수집
+	// 결과 수집 (단일 goroutine에서 순차 처리이므로 동기화 불필요)
 	var attempts []FallbackAttempt
-	var mu sync.Mutex
 	var lastErr error
+	received := 0
 
 	for range targets {
 		res := <-ch
-		mu.Lock()
+		received++
 		attempts = append(attempts, res.attempt)
-		mu.Unlock()
 
 		if res.err == nil && res.resp != nil {
 			cancel() // 나머지 요청 취소
+
+			// 나머지 결과를 백그라운드에서 drain하여 goroutine 누수 방지
+			remaining := len(targets) - received
+			if remaining > 0 {
+				go func() {
+					for i := 0; i < remaining; i++ {
+						<-ch
+					}
+				}()
+			}
+
 			if len(targets) > 1 {
 				res.resp.Metadata.FallbackUsed = true
 				reason := "always_fastest - 가장 빠른 응답 사용"

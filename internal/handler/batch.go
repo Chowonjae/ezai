@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/Chowonjae/ezai/internal/middleware"
 	"github.com/Chowonjae/ezai/internal/model"
+	"github.com/Chowonjae/ezai/internal/provider"
 	"github.com/Chowonjae/ezai/internal/queue"
 )
 
@@ -15,6 +17,7 @@ import (
 type BatchHandler struct {
 	producer *queue.Producer
 	jobStore *queue.JobStore
+	registry *provider.Registry
 	logger   *zap.Logger
 }
 
@@ -27,6 +30,11 @@ func NewBatchHandler(producer *queue.Producer, jobStore *queue.JobStore, logger 
 	}
 }
 
+// SetRegistry - 프로바이더 레지스트리 설정 (배치 요청 검증용)
+func (h *BatchHandler) SetRegistry(r *provider.Registry) {
+	h.registry = r
+}
+
 // Submit - POST /batch
 // 배치 요청을 큐에 등록하고 202 Accepted + Job ID 반환
 func (h *BatchHandler) Submit(c *gin.Context) {
@@ -36,6 +44,14 @@ func (h *BatchHandler) Submit(c *gin.Context) {
 			"error": "잘못된 요청 형식: " + err.Error(),
 		})
 		return
+	}
+
+	// 프로바이더 존재 여부 검증 (큐에 넣기 전에 빠른 실패)
+	if h.registry != nil {
+		if _, err := h.registry.Get(req.Provider); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 	}
 
 	traceID := middleware.GetTraceID(c)
@@ -68,9 +84,11 @@ func (h *BatchHandler) GetJob(c *gin.Context) {
 
 	job, err := h.jobStore.Get(c.Request.Context(), jobID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"error": err.Error(),
-		})
+		if errors.Is(err, queue.ErrJobNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Job 조회 실패"})
+		}
 		return
 	}
 

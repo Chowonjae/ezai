@@ -203,14 +203,25 @@ func (ks *KeyStore) Reactivate(id int64) error {
 // Deactivate - 키 비활성화
 func (ks *KeyStore) Deactivate(id int64) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := ks.db.Exec(
+	result, err := ks.db.Exec(
 		`UPDATE provider_keys SET is_active = 0, updated_at = ? WHERE id = ?`,
 		now, id,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("키를 찾을 수 없습니다 (id=%d)", id)
+	}
+	return nil
 }
 
 // Rotate - 키 로테이션 (기존 키 비활성화 + 새 키 등록)
+// 트랜잭션으로 감싸서 비활성화와 등록이 원자적으로 수행되도록 한다.
 func (ks *KeyStore) Rotate(id int64, newValue string) (*ProviderKey, error) {
 	// 기존 키 조회
 	key, _, err := ks.Get(id)
@@ -218,16 +229,46 @@ func (ks *KeyStore) Rotate(id int64, newValue string) (*ProviderKey, error) {
 		return nil, err
 	}
 
+	// 새 키 값 암호화 (트랜잭션 밖에서 수행)
+	encrypted, err := ks.encryptor.Encrypt([]byte(newValue))
+	if err != nil {
+		return nil, fmt.Errorf("키 암호화 실패: %w", err)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// 트랜잭션: 비활성화 + 등록을 원자적으로 수행
+	tx, err := ks.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("트랜잭션 시작 실패: %w", err)
+	}
+	defer tx.Rollback()
+
 	// 기존 키 비활성화
-	if err := ks.Deactivate(id); err != nil {
+	if _, err := tx.Exec(
+		`UPDATE provider_keys SET is_active = 0, updated_at = ? WHERE id = ?`,
+		now, id,
+	); err != nil {
 		return nil, fmt.Errorf("기존 키 비활성화 실패: %w", err)
 	}
 
 	// 새 키 등록
-	newKey, err := ks.Create(key.Provider, key.KeyName, newValue, key.KeyType)
+	result, err := tx.Exec(
+		`INSERT INTO provider_keys (provider, key_name, encrypted_value, key_type, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		key.Provider, key.KeyName, encrypted, key.KeyType, now, now,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("새 키 등록 실패: %w", err)
 	}
 
-	return newKey, nil
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("트랜잭션 커밋 실패: %w", err)
+	}
+
+	newID, _ := result.LastInsertId()
+	return &ProviderKey{
+		ID: newID, Provider: key.Provider, KeyName: key.KeyName,
+		KeyType: key.KeyType, IsActive: true, CreatedAt: now, UpdatedAt: now,
+	}, nil
 }

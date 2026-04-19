@@ -3,6 +3,8 @@ package router
 import (
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // CircuitState - Circuit Breaker 상태
@@ -39,6 +41,7 @@ type CircuitBreaker struct {
 	halfOpenMax      int           // Half-Open에서 Closed 전환 기준 (성공 횟수)
 	lastFailureTime  time.Time     // 마지막 실패 시각
 	providerName     string
+	logger           *zap.Logger
 }
 
 // NewCircuitBreaker - Circuit Breaker 생성
@@ -49,7 +52,13 @@ func NewCircuitBreaker(providerName string, failureThreshold int, recoveryTimeou
 		recoveryTimeout:  time.Duration(recoveryTimeoutSec) * time.Second,
 		halfOpenMax:      halfOpenMax,
 		providerName:     providerName,
+		logger:           zap.NewNop(), // 기본값: 로깅 비활성화
 	}
+}
+
+// SetLogger - 로거 설정
+func (cb *CircuitBreaker) SetLogger(logger *zap.Logger) {
+	cb.logger = logger
 }
 
 // Allow - 요청 허용 여부 판정
@@ -65,6 +74,9 @@ func (cb *CircuitBreaker) Allow() bool {
 		if time.Since(cb.lastFailureTime) >= cb.recoveryTimeout {
 			cb.state = StateHalfOpen
 			cb.successCount = 0
+			cb.logger.Info("Circuit Breaker 상태 전환",
+				zap.String("provider", cb.providerName),
+				zap.String("from", "open"), zap.String("to", "half-open"))
 			return true
 		}
 		return false
@@ -90,6 +102,9 @@ func (cb *CircuitBreaker) RecordSuccess() {
 			cb.state = StateClosed
 			cb.failureCount = 0
 			cb.successCount = 0
+			cb.logger.Info("Circuit Breaker 상태 전환",
+				zap.String("provider", cb.providerName),
+				zap.String("from", "half-open"), zap.String("to", "closed"))
 		}
 	}
 }
@@ -106,11 +121,18 @@ func (cb *CircuitBreaker) RecordFailure() {
 		cb.failureCount++
 		if cb.failureCount >= cb.failureThreshold {
 			cb.state = StateOpen
+			cb.logger.Warn("Circuit Breaker 상태 전환",
+				zap.String("provider", cb.providerName),
+				zap.String("from", "closed"), zap.String("to", "open"),
+				zap.Int("failure_count", cb.failureCount))
 		}
 	case StateHalfOpen:
 		// Half-Open에서 실패하면 다시 Open
 		cb.state = StateOpen
 		cb.successCount = 0
+		cb.logger.Warn("Circuit Breaker 상태 전환",
+			zap.String("provider", cb.providerName),
+			zap.String("from", "half-open"), zap.String("to", "open"))
 	}
 }
 

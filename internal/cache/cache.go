@@ -64,22 +64,35 @@ func (c *Cache) Set(ctx context.Context, req *model.ChatRequest, resp *model.Cha
 }
 
 // buildKey - 요청 해시 기반 캐시 키 생성
-// provider + model + messages 내용을 해시하여 키를 만든다.
+// 필드 간 null byte 구분자를 사용하여 provider "ab" + model "cd" ≠ "a" + "bcd" 충돌을 방지한다.
 func (c *Cache) buildKey(req *model.ChatRequest) string {
 	h := sha256.New()
+	sep := []byte{0} // 필드 구분자
 	h.Write([]byte(req.Provider))
+	h.Write(sep)
 	h.Write([]byte(req.Model))
+	h.Write(sep)
 	for _, msg := range req.Messages {
 		h.Write([]byte(msg.Role))
+		h.Write(sep)
 		h.Write([]byte(msg.Content))
+		h.Write(sep)
 	}
-	// 옵션도 키에 포함 (같은 메시지라도 temperature가 다르면 다른 응답)
+	// 옵션도 키에 포함 (같은 메시지라도 파라미터가 다르면 다른 응답)
 	if req.Options.Temperature != nil {
 		h.Write([]byte(fmt.Sprintf("t:%f", *req.Options.Temperature)))
 	}
+	h.Write(sep)
 	if req.Options.MaxTokens != nil {
 		h.Write([]byte(fmt.Sprintf("m:%d", *req.Options.MaxTokens)))
 	}
+	h.Write(sep)
+	if req.Options.TopP != nil {
+		h.Write([]byte(fmt.Sprintf("p:%f", *req.Options.TopP)))
+	}
+	h.Write(sep)
+	// 스트리밍 여부도 키에 포함 (비스트리밍 캐시를 스트리밍에 반환 방지)
+	h.Write([]byte(fmt.Sprintf("s:%t", req.Options.Stream)))
 	hash := hex.EncodeToString(h.Sum(nil))[:32]
 	return cacheKeyPrefix + hash
 }

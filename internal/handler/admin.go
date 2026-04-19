@@ -1,8 +1,11 @@
 package handler
 
 import (
+	"database/sql"
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -67,7 +70,9 @@ func (h *AdminHandler) CreateKey(c *gin.Context) {
 
 	// 감사 로그 기록
 	clientID := c.GetHeader("X-Client-ID")
-	_ = h.auditLog.Record(key.ID, "created", clientID, "키 등록: "+req.KeyName)
+	if err := h.auditLog.Record(key.ID, "created", clientID, "키 등록: "+req.KeyName); err != nil {
+		h.logger.Warn("감사 로그 기록 실패", zap.Error(err))
+	}
 
 	h.logger.Info("API 키 등록",
 		zap.String("provider", req.Provider),
@@ -94,12 +99,18 @@ func (h *AdminHandler) UpdateKey(c *gin.Context) {
 	}
 
 	if err := h.keyStore.Update(id, req.KeyValue); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "키를 찾을 수 없습니다"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
 		return
 	}
 
 	clientID := c.GetHeader("X-Client-ID")
-	_ = h.auditLog.Record(id, "updated", clientID, "키 값 업데이트")
+	if err := h.auditLog.Record(id, "updated", clientID, "키 값 업데이트"); err != nil {
+		h.logger.Warn("감사 로그 기록 실패", zap.Error(err))
+	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "키가 업데이트되었습니다"})
 }
@@ -122,13 +133,21 @@ func (h *AdminHandler) RotateKey(c *gin.Context) {
 
 	newKey, err := h.keyStore.Rotate(id, req.KeyValue)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "키를 찾을 수 없습니다"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
 		return
 	}
 
 	clientID := c.GetHeader("X-Client-ID")
-	_ = h.auditLog.Record(id, "rotated", clientID, "기존 키 비활성화")
-	_ = h.auditLog.Record(newKey.ID, "created", clientID, "로테이션으로 생성된 새 키")
+	if err := h.auditLog.Record(id, "rotated", clientID, "기존 키 비활성화"); err != nil {
+		h.logger.Warn("감사 로그 기록 실패", zap.Error(err))
+	}
+	if err := h.auditLog.Record(newKey.ID, "created", clientID, "로테이션으로 생성된 새 키"); err != nil {
+		h.logger.Warn("감사 로그 기록 실패", zap.Error(err))
+	}
 
 	c.JSON(http.StatusOK, newKey)
 }
@@ -142,12 +161,18 @@ func (h *AdminHandler) DeleteKey(c *gin.Context) {
 	}
 
 	if err := h.keyStore.Deactivate(id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		if strings.Contains(err.Error(), "찾을 수 없") {
+			c.JSON(http.StatusNotFound, gin.H{"error": "키를 찾을 수 없습니다"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
 		return
 	}
 
 	clientID := c.GetHeader("X-Client-ID")
-	_ = h.auditLog.Record(id, "deactivated", clientID, "키 비활성화")
+	if err := h.auditLog.Record(id, "deactivated", clientID, "키 비활성화"); err != nil {
+		h.logger.Warn("감사 로그 기록 실패", zap.Error(err))
+	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "키가 비활성화되었습니다"})
 }
@@ -158,9 +183,12 @@ func (h *AdminHandler) DeleteKey(c *gin.Context) {
 func (h *AdminHandler) ListAuditLogs(c *gin.Context) {
 	limit := 100
 	if l := c.Query("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
 			limit = parsed
 		}
+	}
+	if limit > 1000 {
+		limit = 1000
 	}
 
 	entries, err := h.auditLog.List(limit)
@@ -182,9 +210,12 @@ func (h *AdminHandler) ListLogs(c *gin.Context) {
 
 	limit := 100
 	if l := c.Query("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
 			limit = parsed
 		}
+	}
+	if limit > 1000 {
+		limit = 1000
 	}
 
 	var fallbackUsed *bool

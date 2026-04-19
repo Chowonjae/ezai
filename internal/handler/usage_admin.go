@@ -3,6 +3,7 @@ package handler
 import (
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -51,13 +52,18 @@ func (h *UsageAdminHandler) Archive(c *gin.Context) {
 		return
 	}
 
+	// 날짜 형식 검증 (YYYY-MM-DD)
+	if _, err := time.Parse("2006-01-02", req.Before); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "before: 날짜 형식이 올바르지 않습니다 (YYYY-MM-DD)"})
+		return
+	}
+
 	// 확인 문자열 검증
 	if h.retentionConfig.Retention.Reset.RequireConfirmation {
 		expected := fmt.Sprintf("CONFIRM-ARCHIVE-%s", req.Before)
 		if req.Confirmation != expected {
 			c.JSON(http.StatusBadRequest, gin.H{
-				"error":    "확인 문자열이 일치하지 않습니다",
-				"expected": expected,
+				"error": "확인 문자열이 일치하지 않습니다. 형식: CONFIRM-ARCHIVE-{날짜}",
 			})
 			return
 		}
@@ -70,7 +76,7 @@ func (h *UsageAdminHandler) Archive(c *gin.Context) {
 		return
 	}
 
-	h.logger.Info("아카이브 완료",
+	h.logger.Warn("아카이브 완료",
 		zap.String("before", req.Before),
 		zap.Int("archived_rows", result.ArchivedRows),
 		zap.Int("summary_rows", result.SummaryRows),
@@ -103,12 +109,16 @@ func (h *UsageAdminHandler) SoftReset(c *gin.Context) {
 		return
 	}
 
+	if _, err := time.Parse("2006-01-02", req.Before); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "before: 날짜 형식이 올바르지 않습니다 (YYYY-MM-DD)"})
+		return
+	}
+
 	if h.retentionConfig.Retention.Reset.RequireConfirmation {
 		expected := fmt.Sprintf("CONFIRM-RESET-%s", req.Before)
 		if req.Confirmation != expected {
 			c.JSON(http.StatusBadRequest, gin.H{
-				"error":    "확인 문자열이 일치하지 않습니다",
-				"expected": expected,
+				"error": "확인 문자열이 일치하지 않습니다. 형식: CONFIRM-RESET-{날짜}",
 			})
 			return
 		}
@@ -121,7 +131,7 @@ func (h *UsageAdminHandler) SoftReset(c *gin.Context) {
 		return
 	}
 
-	h.logger.Info("소프트 리셋 완료",
+	h.logger.Warn("소프트 리셋 완료",
 		zap.String("before", req.Before),
 		zap.String("reason", req.Reason),
 	)
@@ -152,12 +162,16 @@ func (h *UsageAdminHandler) HardDelete(c *gin.Context) {
 		return
 	}
 
+	if _, err := time.Parse("2006-01-02", req.Before); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "before: 날짜 형식이 올바르지 않습니다 (YYYY-MM-DD)"})
+		return
+	}
+
 	if h.retentionConfig.Retention.Reset.RequireConfirmation {
 		expected := fmt.Sprintf("CONFIRM-DELETE-%s", req.Before)
 		if req.Confirmation != expected {
 			c.JSON(http.StatusBadRequest, gin.H{
-				"error":    "확인 문자열이 일치하지 않습니다",
-				"expected": expected,
+				"error": "확인 문자열이 일치하지 않습니다. 형식: CONFIRM-DELETE-{날짜}",
 			})
 			return
 		}

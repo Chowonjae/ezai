@@ -1,30 +1,17 @@
 package middleware
 
 import (
-	"net/http"
+	"net"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
-// ClientIDKey - 컨텍스트에서 client_id를 꺼내기 위한 키
-const ClientIDKey = "client_id"
-
-// ClientID - client_id 필수 헤더 검증 미들웨어
-// 모든 요청에 X-Client-ID 헤더를 요구한다.
-// 인증과 별개로, 어떤 서비스가 호출했는지 로깅하기 위해 필요하다.
-func ClientID() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		clientID := c.GetHeader("X-Client-ID")
-		if clientID == "" {
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
-				"error": "X-Client-ID 헤더가 필요합니다",
-			})
-			return
-		}
-		c.Set(ClientIDKey, clientID)
-		c.Next()
-	}
-}
+// 컨텍스트 키 상수
+const (
+	ClientIDKey    = "client_id"
+	ServiceNameKey = "service_name"
+)
 
 // GetClientID - 컨텍스트에서 client_id 조회
 func GetClientID(c *gin.Context) string {
@@ -34,4 +21,18 @@ func GetClientID(c *gin.Context) string {
 		}
 	}
 	return ""
+}
+
+// ParseCIDRs - CIDR 문자열 목록을 []*net.IPNet으로 파싱 (공통 함수)
+func ParseCIDRs(cidrs []string, logger *zap.Logger) []*net.IPNet {
+	var nets []*net.IPNet
+	for _, cidr := range cidrs {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			logger.Warn("잘못된 CIDR 형식, 무시됨", zap.String("cidr", cidr), zap.Error(err))
+			continue
+		}
+		nets = append(nets, ipNet)
+	}
+	return nets
 }

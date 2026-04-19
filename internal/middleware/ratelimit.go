@@ -36,14 +36,21 @@ func RateLimit(rdb *redis.Client, cfg RateLimitConfig, logger *zap.Logger) gin.H
 
 		res, err := limiter.Allow(c.Request.Context(), key, limit)
 		if err != nil {
-			logger.Error("Rate Limiter 오류", zap.Error(err))
-			c.Next() // Rate Limiter 장애 시 통과 (fail-open)
+			// Fail-open 정책: Redis 장애 시 요청을 차단하지 않고 통과시킨다.
+			// 가용성을 우선하며, Redis 복구 시 자동으로 rate limiting이 재개된다.
+			// 주의: DDoS 방어가 필요한 환경에서는 in-memory fallback 도입을 검토할 것.
+			logger.Error("Rate Limiter 오류 (fail-open: 요청 통과)",
+				zap.Error(err),
+				zap.String("client_key", key),
+			)
+			c.Next()
 			return
 		}
 
 		// 응답 헤더에 Rate Limit 정보 추가
 		c.Header("X-RateLimit-Limit", intToStr(rpm))
 		c.Header("X-RateLimit-Remaining", intToStr(res.Remaining))
+		c.Header("X-RateLimit-Reset", floatToStr(res.ResetAfter.Seconds()))
 
 		if res.Allowed == 0 {
 			retryAfter := res.RetryAfter.Seconds()

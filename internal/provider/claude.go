@@ -111,30 +111,56 @@ func (c *ClaudeProvider) ChatStream(ctx context.Context, req *model.ChatRequest)
 
 	go func() {
 		defer close(ch)
+		defer stream.Close()
+		var inputTokens int // MessageStartEvent에서 캡처
 		for stream.Next() {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
 			event := stream.Current()
 
 			switch v := event.AsAny().(type) {
+			case anthropic.MessageStartEvent:
+				inputTokens = int(v.Message.Usage.InputTokens)
 			case anthropic.ContentBlockDeltaEvent:
 				if v.Delta.Text != "" {
-					ch <- model.StreamChunk{Content: v.Delta.Text}
+					select {
+					case ch <- model.StreamChunk{Content: v.Delta.Text}:
+					case <-ctx.Done():
+						return
+					}
 				}
 			case anthropic.MessageDeltaEvent:
-				ch <- model.StreamChunk{
+				outputTokens := int(v.Usage.OutputTokens)
+				select {
+				case ch <- model.StreamChunk{
 					Done: true,
 					Usage: &model.UsageInfo{
-						OutputTokens: int(v.Usage.OutputTokens),
+						InputTokens:  inputTokens,
+						OutputTokens: outputTokens,
+						TotalTokens:  inputTokens + outputTokens,
 					},
+				}:
+				case <-ctx.Done():
 				}
 				return
 			}
 		}
 		if err := stream.Err(); err != nil {
 			errMsg := err.Error()
-			ch <- model.StreamChunk{Error: &errMsg, Done: true}
+			select {
+			case ch <- model.StreamChunk{Error: &errMsg, Done: true}:
+			case <-ctx.Done():
+			}
 			return
 		}
-		ch <- model.StreamChunk{Done: true}
+		select {
+		case ch <- model.StreamChunk{Done: true}:
+		case <-ctx.Done():
+		}
 	}()
 
 	return ch, nil

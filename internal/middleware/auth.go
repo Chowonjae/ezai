@@ -32,16 +32,7 @@ type AuthConfig struct {
 // 신뢰 네트워크(trusted CIDR)에서 온 요청은 인증 없이 통과하고,
 // 외부 네트워크에서 온 요청은 X-Client-ID + X-Client-Secret 키 쌍 검증을 수행한다.
 func Auth(cfg AuthConfig, logger *zap.Logger) gin.HandlerFunc {
-	// CIDR 파싱 (서버 시작 시 한 번만 수행)
-	var trustedNets []*net.IPNet
-	for _, cidr := range cfg.TrustedCIDRs {
-		_, ipNet, err := net.ParseCIDR(cidr)
-		if err != nil {
-			logger.Warn("잘못된 CIDR 형식, 무시됨", zap.String("cidr", cidr), zap.Error(err))
-			continue
-		}
-		trustedNets = append(trustedNets, ipNet)
-	}
+	trustedNets := ParseCIDRs(cfg.TrustedCIDRs, logger)
 
 	return func(c *gin.Context) {
 		clientIP := net.ParseIP(c.ClientIP())
@@ -50,9 +41,11 @@ func Auth(cfg AuthConfig, logger *zap.Logger) gin.HandlerFunc {
 		if clientIP != nil {
 			for _, trusted := range trustedNets {
 				if trusted.Contains(clientIP) {
-					// 신뢰 네트워크: X-Client-ID 헤더가 있으면 context에 설정
+					// 신뢰 네트워크: X-Client-ID가 없으면 IP 기반 기본값 설정 (로그 귀속용)
 					if cid := c.GetHeader("X-Client-ID"); cid != "" {
 						c.Set(ClientIDKey, cid)
+					} else {
+						c.Set(ClientIDKey, "trusted-"+c.ClientIP())
 					}
 					c.Next()
 					return
@@ -80,15 +73,21 @@ func Auth(cfg AuthConfig, logger *zap.Logger) gin.HandlerFunc {
 
 		validated, err := cfg.Validator.Validate(clientID, clientSecret)
 		if err != nil {
+			// 내부 에러 상세는 로그에만 기록 (계정 열거 공격 방지)
+			logger.Warn("클라이언트 인증 실패",
+				zap.String("client_id", clientID),
+				zap.String("client_ip", c.ClientIP()),
+				zap.Error(err),
+			)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "인증 실패: " + err.Error(),
+				"error": "인증 실패",
 			})
 			return
 		}
 
 		// context에 인증 정보 설정
 		c.Set(ClientIDKey, validated.ClientID)
-		c.Set("service_name", validated.ServiceName)
+		c.Set(ServiceNameKey, validated.ServiceName)
 
 		// 응답 헤더에 만료 정보 추가
 		c.Header("X-Key-Expires-At", validated.ExpiresAt.UTC().Format(time.RFC3339))

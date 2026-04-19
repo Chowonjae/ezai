@@ -61,6 +61,10 @@ func New(d Deps) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
 
+	// 프록시 신뢰 비활성화: c.ClientIP()가 X-Forwarded-For를 무시하고 실제 원격 IP를 반환하도록 한다.
+	// 리버스 프록시 뒤에서 운영할 경우, 프록시 IP 목록을 명시적으로 설정해야 한다.
+	engine.SetTrustedProxies(nil)
+
 	// ClientKeyValidator 구성
 	var clientKeyValidator *service.ClientKeyService
 	authCfg := middleware.AuthConfig{
@@ -71,20 +75,26 @@ func New(d Deps) *Server {
 		authCfg.Validator = clientKeyValidator
 	}
 
-	// 미들웨어 체인: Recovery → RequestID → Logger → Auth
+	// 공통 미들웨어: Recovery → RequestID → Logger (인증 불필요한 엔드포인트에도 적용)
 	engine.Use(
 		middleware.Recovery(d.Logger),
 		middleware.RequestID(),
 		middleware.Logger(d.Logger),
-		middleware.Auth(authCfg, d.Logger),
 	)
 
-	// Redis Rate Limiting (Redis가 설정된 경우)
+	// Health 엔드포인트 - 인증 없이 접근 가능 (LB/K8s liveness probe용)
+	healthHandler := handler.NewHealthHandler()
+	engine.GET("/health", healthHandler.Health)
+
+	// Rate Limiting → Auth 순서: 인증 실패 요청도 rate limit 적용 (DDoS 방어)
 	if d.Redis != nil {
 		engine.Use(middleware.RateLimit(d.Redis, middleware.RateLimitConfig{
 			RequestsPerMinute: d.Config.Auth.RateLimitPerMinute,
 		}, d.Logger))
 	}
+
+	// 인증 미들웨어 (이후 등록되는 라우트에만 적용)
+	engine.Use(middleware.Auth(authCfg, d.Logger))
 
 	// 핸들러 생성
 	chatHandler := handler.NewChatHandler(d.Registry, d.Logger)
@@ -110,7 +120,6 @@ func New(d Deps) *Server {
 		chatHandler.SetLoggingConfig(d.LoggingConfig)
 	}
 
-	healthHandler := handler.NewHealthHandler()
 	modelsHandler := handler.NewModelsHandler(d.Registry)
 	streamHandler := handler.NewStreamHandler(d.Registry, d.Logger)
 	if d.Router != nil {
@@ -128,6 +137,14 @@ func New(d Deps) *Server {
 	if d.LoggingConfig != nil {
 		streamHandler.SetLoggingConfig(d.LoggingConfig)
 	}
+	if d.ConfigDir != "" {
+		streamHandler.SetConfigDir(d.ConfigDir)
+	}
+	if d.Config.Server.StreamWriteTimeoutSec > 0 {
+		streamHandler.SetStreamWriteTimeout(
+			time.Duration(d.Config.Server.StreamWriteTimeoutSec) * time.Second,
+		)
+	}
 
 	// Usage 핸들러
 	var usageHandler *handler.UsageHandler
@@ -139,6 +156,7 @@ func New(d Deps) *Server {
 	var batchHandler *handler.BatchHandler
 	if d.Producer != nil && d.JobStore != nil {
 		batchHandler = handler.NewBatchHandler(d.Producer, d.JobStore, d.Logger)
+		batchHandler.SetRegistry(d.Registry)
 	}
 
 	// Admin 핸들러
@@ -169,7 +187,6 @@ func New(d Deps) *Server {
 	// 라우트 등록
 	registerRoutes(engine, routesDeps{
 		chatHandler:            chatHandler,
-		healthHandler:          healthHandler,
 		modelsHandler:          modelsHandler,
 		streamHandler:          streamHandler,
 		batchHandler:           batchHandler,
@@ -182,11 +199,15 @@ func New(d Deps) *Server {
 		logger:                 d.Logger,
 	})
 
+	// 요청 body 크기 제한 (기본 10MB)
+	engine.MaxMultipartMemory = 10 << 20
+
 	httpServer := &http.Server{
-		Addr:         d.Config.Server.Addr(),
-		Handler:      engine,
-		ReadTimeout:  time.Duration(d.Config.Server.ReadTimeoutSec) * time.Second,
-		WriteTimeout: time.Duration(d.Config.Server.WriteTimeoutSec) * time.Second,
+		Addr:           d.Config.Server.Addr(),
+		Handler:        engine,
+		ReadTimeout:    time.Duration(d.Config.Server.ReadTimeoutSec) * time.Second,
+		WriteTimeout:   time.Duration(d.Config.Server.WriteTimeoutSec) * time.Second,
+		MaxHeaderBytes: 1 << 20, // 요청 헤더 최대 1MB
 	}
 
 	return &Server{
@@ -210,6 +231,8 @@ func (s *Server) Start() error {
 }
 
 // Shutdown - 서버 종료 (graceful)
+// 순서: HTTP 서버 → consumer → logWriter → Redis
+// HTTP 서버를 먼저 종료해야 진행 중 요청이 Redis/DB를 사용할 수 있다.
 func (s *Server) Shutdown() error {
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
@@ -219,15 +242,28 @@ func (s *Server) Shutdown() error {
 
 	s.logger.Info("서버 종료 중...")
 
+	var shutdownErr error
+
+	// 1. HTTP 서버 종료 (새 요청 거부, 진행 중 요청 완료 대기)
+	if err := s.httpServer.Shutdown(ctx); err != nil {
+		s.logger.Error("HTTP 서버 종료 실패", zap.Error(err))
+		shutdownErr = err
+	}
+
+	// 2. 배치 consumer 종료 (진행 중 작업 완료 대기)
 	if s.consumer != nil {
 		s.consumer.Stop()
 	}
+
+	// 3. 비동기 로그 기록기 종료 (버퍼 flush)
 	if s.logWriter != nil {
 		s.logWriter.Close()
 	}
+
+	// 4. Redis 연결 종료 (모든 사용자가 종료된 후)
 	if s.redis != nil {
 		s.redis.Close()
 	}
 
-	return s.httpServer.Shutdown(ctx)
+	return shutdownErr
 }

@@ -11,15 +11,7 @@ import (
 // TrustedNetworkOnly - 신뢰 네트워크에서만 접근 허용하는 미들웨어
 // admin 라우트 등 외부 접근을 완전히 차단해야 하는 그룹에 사용한다.
 func TrustedNetworkOnly(trustedCIDRs []string, logger *zap.Logger) gin.HandlerFunc {
-	var trustedNets []*net.IPNet
-	for _, cidr := range trustedCIDRs {
-		_, ipNet, err := net.ParseCIDR(cidr)
-		if err != nil {
-			logger.Warn("잘못된 CIDR 형식, 무시됨", zap.String("cidr", cidr), zap.Error(err))
-			continue
-		}
-		trustedNets = append(trustedNets, ipNet)
-	}
+	trustedNets := ParseCIDRs(trustedCIDRs, logger)
 
 	return func(c *gin.Context) {
 		clientIP := net.ParseIP(c.ClientIP())

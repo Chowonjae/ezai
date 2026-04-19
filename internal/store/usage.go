@@ -117,29 +117,31 @@ func (ur *UsageReader) Query(q UsageQuery) (*UsageResult, error) {
 	// group_by 조회
 	if q.GroupBy != "" {
 		groupCol := mapGroupBy(q.GroupBy)
-		if groupCol != "" {
-			groupQuery := fmt.Sprintf(`
-				SELECT %s, COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_usd), 0)
-				FROM request_logs %s
-				GROUP BY %s ORDER BY SUM(cost_usd) DESC`,
-				groupCol, whereClause, groupCol)
+		if groupCol == "" {
+			return nil, fmt.Errorf("유효하지 않은 group_by: %s (provider, model, project, client_id 중 선택)", q.GroupBy)
+		}
 
-			rows, err := ur.db.Query(groupQuery, args...)
-			if err != nil {
-				return nil, fmt.Errorf("그룹 조회 실패: %w", err)
-			}
-			defer rows.Close()
+		groupQuery := fmt.Sprintf(`
+			SELECT %s, COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_usd), 0)
+			FROM request_logs %s
+			GROUP BY %s ORDER BY SUM(cost_usd) DESC`,
+			groupCol, whereClause, groupCol)
 
-			for rows.Next() {
-				var b UsageBreakdown
-				if err := rows.Scan(&b.GroupKey, &b.Requests, &b.InputTokens, &b.OutputTokens, &b.CostUSD); err != nil {
-					return nil, err
-				}
-				result.Breakdown = append(result.Breakdown, b)
-			}
-			if err := rows.Err(); err != nil {
+		rows, err := ur.db.Query(groupQuery, args...)
+		if err != nil {
+			return nil, fmt.Errorf("그룹 조회 실패: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var b UsageBreakdown
+			if err := rows.Scan(&b.GroupKey, &b.Requests, &b.InputTokens, &b.OutputTokens, &b.CostUSD); err != nil {
 				return nil, err
 			}
+			result.Breakdown = append(result.Breakdown, b)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
 		}
 	}
 

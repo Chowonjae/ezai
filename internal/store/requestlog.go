@@ -244,10 +244,10 @@ func (r *RequestLogReader) Query(q LogQuery) ([]LogEntry, error) {
 		args = append(args, val)
 	}
 	if q.Date != "" {
+		// Date가 지정되면 From/To는 무시 (모순 방지)
 		conditions = append(conditions, "date(timestamp) = ?")
 		args = append(args, q.Date)
-	}
-	if q.From != "" && q.To != "" {
+	} else if q.From != "" && q.To != "" {
 		conditions = append(conditions, "date(timestamp) BETWEEN ? AND ?")
 		args = append(args, q.From, q.To)
 	}
@@ -327,10 +327,10 @@ func (r *RequestLogReader) Stats(q LogStatsQuery) ([]LogStatsEntry, error) {
 	var args []any
 
 	if q.Date != "" {
+		// Date가 지정되면 From/To는 무시 (모순 방지)
 		conditions = append(conditions, "date(timestamp) = ?")
 		args = append(args, q.Date)
-	}
-	if q.From != "" && q.To != "" {
+	} else if q.From != "" && q.To != "" {
 		conditions = append(conditions, "date(timestamp) BETWEEN ? AND ?")
 		args = append(args, q.From, q.To)
 	}

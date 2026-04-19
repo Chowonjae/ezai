@@ -90,13 +90,24 @@ func (h *ChatHandler) Chat(c *gin.Context) {
 		return
 	}
 
+	// stream=true는 /chat/stream 엔드포인트를 사용해야 함
+	if req.Options.Stream {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "스트리밍은 POST /chat/stream 엔드포인트를 사용하세요",
+		})
+		return
+	}
+
 	traceID := middleware.GetTraceID(c)
 	clientID := middleware.GetClientID(c)
 
 	// 프롬프트 조합 (project/task가 지정된 경우)
 	if h.promptManager != nil && (req.Project != "" || req.Task != "") {
 		systemPrompt, err := h.promptManager.Build(req.Provider, req.Project, req.Task, req.PromptVars)
-		if err == nil && systemPrompt != "" {
+		if err != nil {
+			h.logger.Warn("프롬프트 빌드 실패",
+				zap.String("project", req.Project), zap.String("task", req.Task), zap.Error(err))
+		} else if systemPrompt != "" {
 			// 기존 system 메시지 앞에 조합된 프롬프트 추가
 			systemMsg := model.Message{Role: "system", Content: systemPrompt}
 			req.Messages = append([]model.Message{systemMsg}, req.Messages...)
@@ -105,7 +116,11 @@ func (h *ChatHandler) Chat(c *gin.Context) {
 
 	// 프로젝트별 기본 fallback 적용 (요청에 fallback이 없고 project가 지정된 경우)
 	if req.Project != "" && len(req.Fallback) == 0 && h.configDir != "" {
-		if projCfg, err := config.LoadProjectFallback(h.configDir, req.Project); err == nil {
+		projCfg, err := config.LoadProjectFallback(h.configDir, req.Project)
+		if err != nil {
+			h.logger.Warn("프로젝트 fallback 설정 로드 실패",
+				zap.String("project", req.Project), zap.Error(err))
+		} else if projCfg != nil {
 			for _, entry := range projCfg.Fallback.DefaultChain {
 				// primary와 같은 프로바이더/모델은 건너뜀
 				if entry.Provider == req.Provider && entry.Model == req.Model {
@@ -138,6 +153,8 @@ func (h *ChatHandler) Chat(c *gin.Context) {
 				zap.String("trace_id", traceID),
 				zap.String("provider", cached.Provider),
 			)
+			// 캐시 히트도 비동기 로그 기록 (캐시 적중률 분석용)
+			h.writeLog(traceID, clientID, c.ClientIP(), &req, cached, nil, 0, nil)
 			c.JSON(http.StatusOK, cached)
 			return
 		}

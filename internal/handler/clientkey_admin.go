@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
@@ -65,7 +66,11 @@ func (h *ClientKeyAdminHandler) Create(c *gin.Context) {
 		return
 	}
 
-	secretHash := crypto.HashSecret(secret)
+	secretHash, err := crypto.HashSecret(secret)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "시크릿 해싱 실패"})
+		return
+	}
 	secretPrefix := secret[:12] // "ezs_" + 8자
 	expiresAt := time.Now().UTC().Add(time.Duration(req.TTLHours) * time.Hour)
 
@@ -76,7 +81,9 @@ func (h *ClientKeyAdminHandler) Create(c *gin.Context) {
 	}
 
 	// 감사 로그
-	_ = h.auditLog.Record(key.ID, "client_key_created", "admin", "클라이언트 키 발급: "+req.ClientID)
+	if err := h.auditLog.Record(key.ID, "client_key_created", "admin", "클라이언트 키 발급: "+req.ClientID); err != nil {
+		h.logger.Warn("감사 로그 기록 실패", zap.Error(err))
+	}
 
 	h.logger.Info("클라이언트 키 발급",
 		zap.String("client_id", req.ClientID),
@@ -114,7 +121,11 @@ func (h *ClientKeyAdminHandler) Revoke(c *gin.Context) {
 	clientID := c.Param("client_id")
 
 	if err := h.store.Deactivate(clientID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		if errors.Is(err, store.ErrKeyNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "키를 찾을 수 없습니다: " + clientID})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
 		return
 	}
 
@@ -124,7 +135,9 @@ func (h *ClientKeyAdminHandler) Revoke(c *gin.Context) {
 	}
 
 	// 감사 로그 (ID 대신 0 사용, detail에 client_id 기록)
-	_ = h.auditLog.Record(0, "client_key_revoked", "admin", "클라이언트 키 폐기: "+clientID)
+	if err := h.auditLog.Record(0, "client_key_revoked", "admin", "클라이언트 키 폐기: "+clientID); err != nil {
+		h.logger.Warn("감사 로그 기록 실패", zap.Error(err))
+	}
 
 	h.logger.Info("클라이언트 키 폐기", zap.String("client_id", clientID))
 
@@ -165,7 +178,11 @@ func (h *ClientKeyAdminHandler) Reissue(c *gin.Context) {
 		return
 	}
 
-	secretHash := crypto.HashSecret(secret)
+	secretHash, err := crypto.HashSecret(secret)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "시크릿 해싱 실패"})
+		return
+	}
 	secretPrefix := secret[:12]
 	expiresAt := time.Now().UTC().Add(time.Duration(req.TTLHours) * time.Hour)
 
@@ -179,7 +196,9 @@ func (h *ClientKeyAdminHandler) Reissue(c *gin.Context) {
 		h.validator.InvalidateCache(clientID)
 	}
 
-	_ = h.auditLog.Record(existing.ID, "client_key_reissued", "admin", "클라이언트 키 재발급: "+clientID)
+	if err := h.auditLog.Record(existing.ID, "client_key_reissued", "admin", "클라이언트 키 재발급: "+clientID); err != nil {
+		h.logger.Warn("감사 로그 기록 실패", zap.Error(err))
+	}
 
 	h.logger.Info("클라이언트 키 재발급",
 		zap.String("client_id", clientID),

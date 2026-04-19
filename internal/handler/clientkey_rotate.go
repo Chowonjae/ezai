@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -42,9 +43,26 @@ func (h *ClientKeyRotateHandler) Rotate(c *gin.Context) {
 
 	// 현재 키 정보 조회 (만료일 확인용)
 	existing, err := h.store.GetByClientID(clientID)
-	if err != nil || existing == nil {
+	if err != nil {
+		h.logger.Error("키 조회 실패", zap.String("client_id", clientID), zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "키 조회 실패"})
 		return
+	}
+	if existing == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "키를 찾을 수 없습니다"})
+		return
+	}
+
+	if !existing.IsActive {
+		c.JSON(http.StatusForbidden, gin.H{"error": "비활성화된 키는 로테이션할 수 없습니다"})
+		return
+	}
+
+	if expiresAt, err := time.Parse(time.RFC3339, existing.ExpiresAt); err == nil {
+		if time.Now().UTC().After(expiresAt) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "만료된 키는 로테이션할 수 없습니다. 관리자에게 재발급을 요청하세요"})
+			return
+		}
 	}
 
 	// 새 시크릿 생성
@@ -54,7 +72,11 @@ func (h *ClientKeyRotateHandler) Rotate(c *gin.Context) {
 		return
 	}
 
-	secretHash := crypto.HashSecret(secret)
+	secretHash, err := crypto.HashSecret(secret)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "시크릿 해싱 실패"})
+		return
+	}
 	secretPrefix := secret[:12]
 
 	// 시크릿만 교체 (만료일은 유지)
@@ -68,7 +90,9 @@ func (h *ClientKeyRotateHandler) Rotate(c *gin.Context) {
 		h.validator.InvalidateCache(clientID)
 	}
 
-	_ = h.auditLog.Record(existing.ID, "client_key_rotated", clientID, "셀프 로테이션")
+	if err := h.auditLog.Record(existing.ID, "client_key_rotated", clientID, "셀프 로테이션"); err != nil {
+		h.logger.Warn("감사 로그 기록 실패", zap.Error(err))
+	}
 
 	h.logger.Info("클라이언트 키 셀프 로테이션",
 		zap.String("client_id", clientID),

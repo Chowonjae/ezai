@@ -13,7 +13,9 @@ CREATE TABLE IF NOT EXISTS archived_daily_summary (
     cost_usd REAL NOT NULL DEFAULT 0,
     avg_latency_ms INTEGER NOT NULL DEFAULT 0,
     error_count INTEGER NOT NULL DEFAULT 0,
-    archived_at TEXT NOT NULL
+    archived_at TEXT NOT NULL,
+    -- 동일 그룹의 중복 아카이브 방지
+    UNIQUE(date, actual_provider, actual_model, project, client_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_archived_date ON archived_daily_summary(date);

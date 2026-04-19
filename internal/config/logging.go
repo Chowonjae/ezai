@@ -1,7 +1,7 @@
 package config
 
 import (
-	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -47,7 +47,7 @@ func LoadLoggingConfig(configDir string) *LoggingConfig {
 
 	cfg := &LoggingConfig{}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
-		fmt.Printf("logging.yaml 파싱 실패, 기본값 사용: %v\n", err)
+		log.Printf("[WARN] logging.yaml 파싱 실패, 기본값 사용: %v", err)
 		return defaultLoggingConfig()
 	}
 
@@ -77,11 +77,16 @@ func defaultLoggingConfig() *LoggingConfig {
 }
 
 // applyLoggingDefaults - 기본값 적용
+// 주의: 음수(-1)는 "미리보기 비활성화"로 처리, 0은 기본값 200 적용
 func applyLoggingDefaults(cfg *LoggingConfig) {
-	if cfg.Logging.Record.InputPreviewLength == 0 {
+	if cfg.Logging.Record.InputPreviewLength < 0 {
+		cfg.Logging.Record.InputPreviewLength = 0 // 비활성화
+	} else if cfg.Logging.Record.InputPreviewLength == 0 {
 		cfg.Logging.Record.InputPreviewLength = 200
 	}
-	if cfg.Logging.Record.OutputPreviewLength == 0 {
+	if cfg.Logging.Record.OutputPreviewLength < 0 {
+		cfg.Logging.Record.OutputPreviewLength = 0 // 비활성화
+	} else if cfg.Logging.Record.OutputPreviewLength == 0 {
 		cfg.Logging.Record.OutputPreviewLength = 200
 	}
 }

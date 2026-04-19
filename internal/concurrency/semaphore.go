@@ -13,7 +13,11 @@ type Semaphore struct {
 }
 
 // NewSemaphore - maxConcurrent 개수만큼의 세마포어 생성
+// maxConcurrent가 0 이하이면 기본값 1을 적용하여 데드락을 방지한다.
 func NewSemaphore(name string, maxConcurrent int) *Semaphore {
+	if maxConcurrent <= 0 {
+		maxConcurrent = 1
+	}
 	return &Semaphore{
 		ch:   make(chan struct{}, maxConcurrent),
 		name: name,
@@ -35,7 +39,8 @@ func (s *Semaphore) Release() {
 	<-s.ch
 }
 
-// Available - 현재 사용 가능한 슬롯 수
+// Available - 현재 사용 가능한 슬롯 수 (정보 표시용, 비원자적)
+// 주의: 반환값은 근사치이며 동시성 제어 판단에 사용하면 안 된다.
 func (s *Semaphore) Available() int {
 	return cap(s.ch) - len(s.ch)
 }

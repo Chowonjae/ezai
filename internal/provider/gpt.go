@@ -99,29 +99,47 @@ func (g *GPTProvider) ChatStream(ctx context.Context, req *model.ChatRequest) (<
 		defer close(ch)
 		defer stream.Close()
 		for stream.Next() {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
 			chunk := stream.Current()
 			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-				ch <- model.StreamChunk{Content: chunk.Choices[0].Delta.Content}
+				select {
+				case ch <- model.StreamChunk{Content: chunk.Choices[0].Delta.Content}:
+				case <-ctx.Done():
+					return
+				}
 			}
-			// 최종 사용량 (stream_options.include_usage=true일 때)
 			if chunk.Usage.TotalTokens > 0 {
-				ch <- model.StreamChunk{
+				select {
+				case ch <- model.StreamChunk{
 					Done: true,
 					Usage: &model.UsageInfo{
 						InputTokens:  int(chunk.Usage.PromptTokens),
 						OutputTokens: int(chunk.Usage.CompletionTokens),
 						TotalTokens:  int(chunk.Usage.TotalTokens),
 					},
+				}:
+				case <-ctx.Done():
 				}
 				return
 			}
 		}
 		if err := stream.Err(); err != nil {
 			errMsg := err.Error()
-			ch <- model.StreamChunk{Error: &errMsg, Done: true}
+			select {
+			case ch <- model.StreamChunk{Error: &errMsg, Done: true}:
+			case <-ctx.Done():
+			}
 			return
 		}
-		ch <- model.StreamChunk{Done: true}
+		select {
+		case ch <- model.StreamChunk{Done: true}:
+		case <-ctx.Done():
+		}
 	}()
 
 	return ch, nil

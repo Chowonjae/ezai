@@ -10,9 +10,8 @@ import (
 
 // routesDeps - 라우트 등록에 필요한 의존성
 type routesDeps struct {
-	chatHandler            *handler.ChatHandler
-	healthHandler          *handler.HealthHandler
-	modelsHandler          *handler.ModelsHandler
+	chatHandler   *handler.ChatHandler
+	modelsHandler *handler.ModelsHandler
 	streamHandler          *handler.StreamHandler
 	batchHandler           *handler.BatchHandler
 	usageHandler           *handler.UsageHandler
@@ -25,10 +24,8 @@ type routesDeps struct {
 }
 
 // registerRoutes - 라우트 등록
+// 주의: /health는 server.go에서 인증 미들웨어 이전에 별도 등록됨
 func registerRoutes(r *gin.Engine, d routesDeps) {
-	// 헬스체크
-	r.GET("/health", d.healthHandler.Health)
-
 	// 채팅 API
 	r.POST("/chat", d.chatHandler.Chat)
 

@@ -21,13 +21,15 @@ import (
 
 // StreamHandler - SSE 스트리밍 핸들러
 type StreamHandler struct {
-	registry       *provider.Registry
-	router         *router.Router
-	promptManager  *config.PromptManager
-	pricingManager *config.PricingManager
-	loggingConfig  *config.LoggingConfig
-	logger         *zap.Logger
-	logWriter      *store.RequestLogWriter
+	registry            *provider.Registry
+	router              *router.Router
+	promptManager       *config.PromptManager
+	pricingManager      *config.PricingManager
+	loggingConfig       *config.LoggingConfig
+	logger              *zap.Logger
+	logWriter           *store.RequestLogWriter
+	configDir           string
+	streamWriteTimeout  time.Duration // SSE 스트리밍 전용 WriteDeadline (기본 10분)
 }
 
 // NewStreamHandler - 스트리밍 핸들러 생성
@@ -63,6 +65,16 @@ func (h *StreamHandler) SetLogWriter(w *store.RequestLogWriter) {
 	h.logWriter = w
 }
 
+// SetConfigDir - 설정 디렉토리 설정 (프로젝트별 fallback용)
+func (h *StreamHandler) SetConfigDir(dir string) {
+	h.configDir = dir
+}
+
+// SetStreamWriteTimeout - SSE 스트리밍 전용 WriteDeadline 설정
+func (h *StreamHandler) SetStreamWriteTimeout(d time.Duration) {
+	h.streamWriteTimeout = d
+}
+
 // Stream - POST /chat/stream
 // SSE(Server-Sent Events)로 스트리밍 응답을 반환한다.
 // Router가 설정된 경우 Circuit Breaker/세마포어/Fallback을 적용한다.
@@ -82,9 +94,34 @@ func (h *StreamHandler) Stream(c *gin.Context) {
 	// 프롬프트 조합 (project/task가 지정된 경우)
 	if h.promptManager != nil && (req.Project != "" || req.Task != "") {
 		systemPrompt, err := h.promptManager.Build(req.Provider, req.Project, req.Task, req.PromptVars)
-		if err == nil && systemPrompt != "" {
+		if err != nil {
+			h.logger.Warn("프롬프트 빌드 실패",
+				zap.String("project", req.Project), zap.String("task", req.Task), zap.Error(err))
+		} else if systemPrompt != "" {
 			systemMsg := model.Message{Role: "system", Content: systemPrompt}
 			req.Messages = append([]model.Message{systemMsg}, req.Messages...)
+		}
+	}
+
+	// 프로젝트별 기본 fallback 적용 (요청에 fallback이 없고 project가 지정된 경우)
+	if req.Project != "" && len(req.Fallback) == 0 && h.configDir != "" {
+		projCfg, err := config.LoadProjectFallback(h.configDir, req.Project)
+		if err != nil {
+			h.logger.Warn("프로젝트 fallback 설정 로드 실패",
+				zap.String("project", req.Project), zap.Error(err))
+		} else if projCfg != nil {
+			for _, entry := range projCfg.Fallback.DefaultChain {
+				if entry.Provider == req.Provider && entry.Model == req.Model {
+					continue
+				}
+				req.Fallback = append(req.Fallback, model.FallbackTarget{
+					Provider: entry.Provider,
+					Model:    entry.Model,
+				})
+			}
+			if req.FallbackPolicy == "" && projCfg.Fallback.Policy != "" {
+				req.FallbackPolicy = projCfg.Fallback.Policy
+			}
 		}
 	}
 
@@ -103,6 +140,12 @@ func (h *StreamHandler) Stream(c *gin.Context) {
 
 	if h.router != nil {
 		targets := h.router.BuildTargets(&req)
+		if len(targets) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "사용 가능한 프로바이더가 없습니다",
+			})
+			return
+		}
 		var lastErr error
 
 		for i, target := range targets {
@@ -163,10 +206,9 @@ func (h *StreamHandler) Stream(c *gin.Context) {
 				continue
 			}
 
-			// 스트리밍 연결 성공
+			// 스트리밍 연결 성공 (CB 결과는 스트림 완료 후 기록)
 			attempt.Status = "success"
 			attempts = append(attempts, attempt)
-			h.router.RecordSuccess(target.Provider)
 
 			ch = streamCh
 			actualProvider = target.Provider
@@ -183,9 +225,18 @@ func (h *StreamHandler) Stream(c *gin.Context) {
 		}
 
 		if ch == nil {
+			// fallback 대상이 있었지만 전부 실패한 경우 기록
+			if len(attempts) > 1 {
+				fallbackUsed = true
+				fallbackReason = "fallback:stream:all_failed"
+			}
 			h.writeStreamLog(traceID, clientID, c.ClientIP(), &req, "", "", nil, "", attempts, fallbackUsed, fallbackReason, time.Since(start).Milliseconds(), lastErr)
+			errMsg := "모든 프로바이더 스트리밍 실패"
+			if lastErr != nil {
+				errMsg += ": " + lastErr.Error()
+			}
 			c.JSON(http.StatusBadGateway, gin.H{
-				"error": "모든 프로바이더 스트리밍 실패: " + lastErr.Error(),
+				"error": errMsg,
 			})
 			return
 		}
@@ -210,6 +261,16 @@ func (h *StreamHandler) Stream(c *gin.Context) {
 		actualModel = req.Model
 	}
 
+	// SSE 스트리밍 전용 WriteDeadline 연장
+	// 글로벌 WriteTimeout(120s)은 동기 응답용이므로, 스트리밍은 별도 연장한다.
+	if h.streamWriteTimeout > 0 {
+		rc := http.NewResponseController(c.Writer)
+		if err := rc.SetWriteDeadline(time.Now().Add(h.streamWriteTimeout)); err != nil {
+			h.logger.Warn("스트리밍 WriteDeadline 연장 실패 (기존 타임아웃으로 동작)",
+				zap.Error(err), zap.Duration("timeout", h.streamWriteTimeout))
+		}
+	}
+
 	// SSE 헤더 설정
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
@@ -219,6 +280,7 @@ func (h *StreamHandler) Stream(c *gin.Context) {
 	// 사용량 추적
 	var finalUsage *model.UsageInfo
 	var fullContent strings.Builder
+	var streamErrorMsg string // 스트림 도중 에러 메시지 (빈 문자열 = 에러 없음)
 
 	// SSE 이벤트 전송
 	c.Stream(func(w io.Writer) bool {
@@ -232,6 +294,7 @@ func (h *StreamHandler) Stream(c *gin.Context) {
 
 		if chunk.Error != nil {
 			// 에러 이벤트
+			streamErrorMsg = *chunk.Error
 			errData, _ := json.Marshal(gin.H{"error": *chunk.Error})
 			fmt.Fprintf(w, "event: error\ndata: %s\n\n", errData)
 			c.Writer.Flush()
@@ -263,6 +326,15 @@ func (h *StreamHandler) Stream(c *gin.Context) {
 
 	totalLatency := time.Since(start).Milliseconds()
 
+	// 스트림 완료 후 Circuit Breaker 결과 기록
+	if h.router != nil && actualProvider != "" {
+		if streamErrorMsg != "" {
+			h.router.RecordFailure(actualProvider)
+		} else {
+			h.router.RecordSuccess(actualProvider)
+		}
+	}
+
 	// 비용 자동 계산
 	if h.pricingManager != nil && finalUsage != nil {
 		finalUsage.EstimatedCost = h.pricingManager.Calculate(
@@ -279,7 +351,11 @@ func (h *StreamHandler) Stream(c *gin.Context) {
 	)
 
 	// 비동기 로그 기록
-	h.writeStreamLog(traceID, clientID, c.ClientIP(), &req, actualProvider, actualModel, finalUsage, fullContent.String(), attempts, fallbackUsed, fallbackReason, totalLatency, nil)
+	var logErr error
+	if streamErrorMsg != "" {
+		logErr = fmt.Errorf("스트림 에러: %s", streamErrorMsg)
+	}
+	h.writeStreamLog(traceID, clientID, c.ClientIP(), &req, actualProvider, actualModel, finalUsage, fullContent.String(), attempts, fallbackUsed, fallbackReason, totalLatency, logErr)
 }
 
 // writeStreamLog - 스트리밍 요청 로그를 비동기로 기록

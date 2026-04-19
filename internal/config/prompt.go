@@ -17,6 +17,8 @@ type PromptConfig struct {
 	Defaults     map[string]any         `yaml:"defaults"`
 }
 
+const maxPromptCacheSize = 256 // 프롬프트 캐시 최대 항목 수
+
 // PromptManager - 프롬프트 계층 조합 관리
 // 조합 우선순위: base + project + model(선택) + task
 // 모델 특화 오버라이드: tasks/{task}.{model}.yaml > tasks/{task}.yaml
@@ -38,6 +40,13 @@ func NewPromptManager(promptsDir string) *PromptManager {
 // provider, project, task에 따라 계층적으로 프롬프트를 조합한다.
 // prompt_variables로 변수 치환을 수행한다.
 func (pm *PromptManager) Build(provider, project, task string, variables map[string]any) (string, error) {
+	// 경로 순회 방지: project/task/provider에 ".."이나 절대경로가 포함되면 거부
+	for _, name := range []string{project, task, provider} {
+		if strings.Contains(name, "..") || filepath.IsAbs(name) || strings.ContainsAny(name, `/\`) {
+			return "", fmt.Errorf("잘못된 이름: %q (경로 구분자 사용 불가)", name)
+		}
+	}
+
 	var parts []string
 
 	// 1. base.yaml (공통)
@@ -116,6 +125,17 @@ func (pm *PromptManager) load(relativePath string) (*PromptConfig, error) {
 	}
 
 	pm.mu.Lock()
+	// 캐시 크기 제한 초과 시 절반 삭제 (랜덤 eviction)
+	if len(pm.cache) >= maxPromptCacheSize {
+		half := len(pm.cache) / 2
+		for k := range pm.cache {
+			if half <= 0 {
+				break
+			}
+			delete(pm.cache, k)
+			half--
+		}
+	}
 	pm.cache[relativePath] = cfg
 	pm.mu.Unlock()
 	return cfg, nil
