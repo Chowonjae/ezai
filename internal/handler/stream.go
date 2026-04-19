@@ -87,6 +87,11 @@ func (h *StreamHandler) Stream(c *gin.Context) {
 		return
 	}
 
+	if err := req.ValidateOptions(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
 	traceID := middleware.GetTraceID(c)
 	clientID := middleware.GetClientID(c)
 	start := time.Now()
@@ -231,12 +236,9 @@ func (h *StreamHandler) Stream(c *gin.Context) {
 				fallbackReason = "fallback:stream:all_failed"
 			}
 			h.writeStreamLog(traceID, clientID, c.ClientIP(), &req, "", "", nil, "", attempts, fallbackUsed, fallbackReason, time.Since(start).Milliseconds(), lastErr)
-			errMsg := "모든 프로바이더 스트리밍 실패"
-			if lastErr != nil {
-				errMsg += ": " + lastErr.Error()
-			}
 			c.JSON(http.StatusBadGateway, gin.H{
-				"error": errMsg,
+				"error":    "모든 프로바이더 스트리밍 실패",
+				"trace_id": traceID,
 			})
 			return
 		}

@@ -42,6 +42,7 @@ func Auth(cfg AuthConfig, logger *zap.Logger) gin.HandlerFunc {
 			for _, trusted := range trustedNets {
 				if trusted.Contains(clientIP) {
 					// 신뢰 네트워크: X-Client-ID가 없으면 IP 기반 기본값 설정 (로그 귀속용)
+					c.Set(TrustedNetKey, true)
 					if cid := c.GetHeader("X-Client-ID"); cid != "" {
 						c.Set(ClientIDKey, cid)
 					} else {

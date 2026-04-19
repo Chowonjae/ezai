@@ -302,9 +302,12 @@ func (r *Router) executeFastest(ctx context.Context, req *model.ChatRequest, tar
 			}
 
 			if len(targets) > 1 {
-				res.resp.Metadata.FallbackUsed = true
-				reason := "always_fastest - 가장 빠른 응답 사용"
-				res.resp.Metadata.FallbackReason = &reason
+				// primary(order=1)가 아닌 프로바이더가 응답한 경우에만 fallback 표시
+				if res.attempt.Order > 1 {
+					res.resp.Metadata.FallbackUsed = true
+					reason := "always_fastest - 가장 빠른 응답 사용"
+					res.resp.Metadata.FallbackReason = &reason
+				}
 			}
 			return res.resp, attempts, nil
 		}

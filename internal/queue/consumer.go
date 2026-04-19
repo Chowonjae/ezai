@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -59,6 +60,12 @@ func (c *Consumer) Start(ctx context.Context) {
 			c.worker(ctx, id)
 		}(i)
 	}
+	// 고아 Job 감지 goroutine
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.reaper(ctx)
+	}()
 	c.logger.Info("배치 Consumer 시작", zap.Int("workers", c.workers))
 }
 
@@ -138,8 +145,8 @@ func (c *Consumer) processItem(ctx context.Context, itemJSON string) {
 		createdAt = existing.CreatedAt
 	}
 
-	// 상태: processing
-	if err := c.jobStore.UpdateStatus(ctx, item.JobID, model.JobProcessing); err != nil {
+	// 상태: processing (추적 Set에도 등록)
+	if err := c.jobStore.MarkProcessing(ctx, item.JobID); err != nil {
 		c.logger.Warn("Job 상태 업데이트 실패", zap.String("job_id", item.JobID), zap.Error(err))
 	}
 
@@ -210,6 +217,7 @@ func (c *Consumer) processItem(ctx context.Context, itemJSON string) {
 		c.logger.Error("Job 저장 실패", zap.String("job_id", item.JobID), zap.Error(err))
 		return
 	}
+	c.jobStore.ClearProcessing(ctx, item.JobID)
 
 	c.logger.Info("배치 처리 완료", zap.String("job_id", item.JobID), zap.String("provider", resp.Provider))
 }
@@ -228,6 +236,7 @@ func (c *Consumer) failJob(ctx context.Context, jobID string, createdAt time.Tim
 	if saveErr := c.jobStore.Save(ctx, job); saveErr != nil {
 		c.logger.Warn("실패 Job 저장 실패", zap.String("job_id", jobID), zap.Error(saveErr))
 	}
+	c.jobStore.ClearProcessing(ctx, jobID)
 	c.logger.Error("배치 처리 실패", zap.String("job_id", jobID), zap.Error(err))
 }
 
@@ -258,4 +267,36 @@ func isRetryableError(err error) bool {
 		}
 	}
 	return false
+}
+
+const (
+	staleThreshold = 10 * time.Minute // processing 상태로 이 시간 이상 경과하면 고아로 판정
+	reaperInterval = 2 * time.Minute  // 고아 Job 스캔 주기
+)
+
+// reaper - 고아 Job 감지 및 실패 처리
+// processing 상태로 staleThreshold 이상 경과한 Job을 failed로 전환한다.
+func (c *Consumer) reaper(ctx context.Context) {
+	ticker := time.NewTicker(reaperInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			staleIDs, err := c.jobStore.StaleProcessingJobs(ctx, staleThreshold)
+			if err != nil {
+				c.logger.Warn("고아 Job 스캔 실패", zap.Error(err))
+				continue
+			}
+			for _, jobID := range staleIDs {
+				c.logger.Warn("고아 Job 감지, 실패 처리",
+					zap.String("job_id", jobID),
+					zap.Duration("threshold", staleThreshold),
+				)
+				c.failJob(ctx, jobID, time.Time{}, fmt.Errorf("processing 타임아웃 (%s 초과)", staleThreshold))
+			}
+		}
+	}
 }

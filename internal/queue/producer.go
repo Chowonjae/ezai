@@ -28,12 +28,13 @@ func NewProducer(rdb *redis.Client, jobStore *JobStore) *Producer {
 }
 
 // Enqueue - 배치 요청을 큐에 등록하고 Job ID 반환
-func (p *Producer) Enqueue(ctx context.Context, req *model.ChatRequest) (string, error) {
+func (p *Producer) Enqueue(ctx context.Context, req *model.ChatRequest, clientID string) (string, error) {
 	jobID := fmt.Sprintf("job_%s_%s", time.Now().Format("20060102_150405"), uuid.New().String()[:8])
 
 	// Job 상태 저장
 	job := &model.BatchJob{
 		JobID:     jobID,
+		ClientID:  clientID,
 		Status:    model.JobPending,
 		Request:   req,
 		CreatedAt: time.Now().UTC(),

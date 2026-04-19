@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -143,6 +144,10 @@ func Load(configDir string) (*Config, error) {
 
 // LoadProjectFallback - 프로젝트별 fallback 설정 로드
 func LoadProjectFallback(configDir, project string) (*ProjectFallbackConfig, error) {
+	// 경로 순회 방지
+	if strings.Contains(project, "..") || filepath.IsAbs(project) || strings.ContainsAny(project, `/\`) {
+		return nil, fmt.Errorf("잘못된 프로젝트명: %q (경로 구분자 사용 불가)", project)
+	}
 	path := filepath.Join(configDir, "projects", project+".yaml")
 	data, err := os.ReadFile(path)
 	if err != nil {

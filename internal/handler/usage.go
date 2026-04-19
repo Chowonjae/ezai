@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/Chowonjae/ezai/internal/config"
+	"github.com/Chowonjae/ezai/internal/middleware"
 	"github.com/Chowonjae/ezai/internal/store"
 )
 
@@ -61,8 +62,31 @@ func (h *UsageHandler) Usage(c *gin.Context) {
 		}
 	}
 
+	// period 파라미터 검증
+	period := c.DefaultQuery("period", "daily")
+	switch period {
+	case "daily", "monthly", "yearly", "custom":
+		// OK
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "유효하지 않은 period: " + period + " (daily, monthly, yearly, custom 중 선택)",
+		})
+		return
+	}
+
+	// 접근 제어: 외부 네트워크에서는 자신의 client_id만 조회 가능
+	queryClientID := c.Query("client_id")
+	if !middleware.IsTrustedNet(c) {
+		ownClientID := middleware.GetClientID(c)
+		if queryClientID != "" && queryClientID != ownClientID {
+			c.JSON(http.StatusForbidden, gin.H{"error": "다른 클라이언트의 사용량은 조회할 수 없습니다"})
+			return
+		}
+		queryClientID = ownClientID
+	}
+
 	q := store.UsageQuery{
-		Period:   c.DefaultQuery("period", "daily"),
+		Period:   period,
 		Date:     c.Query("date"),
 		Month:    c.Query("month"),
 		Year:     c.Query("year"),
@@ -71,7 +95,7 @@ func (h *UsageHandler) Usage(c *gin.Context) {
 		Provider: c.Query("provider"),
 		Model:    c.Query("model"),
 		Project:  c.Query("project"),
-		ClientID: c.Query("client_id"),
+		ClientID: queryClientID,
 		GroupBy:  c.Query("group_by"),
 	}
 

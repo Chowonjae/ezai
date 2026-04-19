@@ -16,8 +16,9 @@ import (
 var ErrJobNotFound = errors.New("Job을 찾을 수 없습니다")
 
 const (
-	jobKeyPrefix = "ezai:batch:job:"  // Redis Hash 키 접두사
-	jobTTL       = 24 * time.Hour     // Job 데이터 보존 기간
+	jobKeyPrefix     = "ezai:batch:job:"        // Redis Hash 키 접두사
+	processingSetKey = "ezai:batch:processing"  // processing 상태 Job 추적용 Sorted Set (score=시작 시각)
+	jobTTL           = 24 * time.Hour           // Job 데이터 보존 기간
 )
 
 // JobStore - Redis 기반 Job 상태 관리
@@ -43,6 +44,7 @@ func (js *JobStore) Save(ctx context.Context, job *model.BatchJob) error {
 
 	fields := map[string]interface{}{
 		"job_id":     job.JobID,
+		"client_id":  job.ClientID,
 		"status":     string(job.Status),
 		"request":    string(reqJSON),
 		"response":   string(respJSON),
@@ -71,8 +73,9 @@ func (js *JobStore) Get(ctx context.Context, jobID string) (*model.BatchJob, err
 	}
 
 	job := &model.BatchJob{
-		JobID:  vals["job_id"],
-		Status: model.JobStatus(vals["status"]),
+		JobID:    vals["job_id"],
+		ClientID: vals["client_id"],
+		Status:   model.JobStatus(vals["status"]),
 	}
 
 	if vals["request"] != "" && vals["request"] != "null" {
@@ -111,4 +114,29 @@ func (js *JobStore) UpdateStatus(ctx context.Context, jobID string, status model
 		"status", string(status),
 		"updated_at", time.Now().UTC().Format(time.RFC3339),
 	).Err()
+}
+
+// MarkProcessing - Job을 processing 상태로 전환하고 추적 Set에 등록
+func (js *JobStore) MarkProcessing(ctx context.Context, jobID string) error {
+	if err := js.UpdateStatus(ctx, jobID, model.JobProcessing); err != nil {
+		return err
+	}
+	return js.rdb.ZAdd(ctx, processingSetKey, redis.Z{
+		Score:  float64(time.Now().UTC().Unix()),
+		Member: jobID,
+	}).Err()
+}
+
+// ClearProcessing - 완료/실패 시 추적 Set에서 제거
+func (js *JobStore) ClearProcessing(ctx context.Context, jobID string) {
+	js.rdb.ZRem(ctx, processingSetKey, jobID)
+}
+
+// StaleProcessingJobs - 지정 시간 이상 processing 상태인 Job ID 목록 반환
+func (js *JobStore) StaleProcessingJobs(ctx context.Context, threshold time.Duration) ([]string, error) {
+	cutoff := float64(time.Now().UTC().Add(-threshold).Unix())
+	return js.rdb.ZRangeByScore(ctx, processingSetKey, &redis.ZRangeBy{
+		Min: "-inf",
+		Max: fmt.Sprintf("%f", cutoff),
+	}).Result()
 }

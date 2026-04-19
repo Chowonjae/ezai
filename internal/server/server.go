@@ -75,10 +75,11 @@ func New(d Deps) *Server {
 		authCfg.Validator = clientKeyValidator
 	}
 
-	// 공통 미들웨어: Recovery → RequestID → Logger (인증 불필요한 엔드포인트에도 적용)
+	// 공통 미들웨어: Recovery → RequestID → BodyLimit → Logger
 	engine.Use(
 		middleware.Recovery(d.Logger),
 		middleware.RequestID(),
+		middleware.BodyLimit(10<<20), // 요청 body 최대 10MB
 		middleware.Logger(d.Logger),
 	)
 

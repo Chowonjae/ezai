@@ -15,6 +15,7 @@ const (
 // BatchJob - 배치 작업
 type BatchJob struct {
 	JobID     string        `json:"job_id"`
+	ClientID  string        `json:"client_id"`
 	Status    JobStatus     `json:"status"`
 	Request   *ChatRequest  `json:"request,omitempty"`
 	Response  *ChatResponse `json:"response,omitempty"`

@@ -90,6 +90,11 @@ func (h *ChatHandler) Chat(c *gin.Context) {
 		return
 	}
 
+	if err := req.ValidateOptions(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
 	// stream=true는 /chat/stream 엔드포인트를 사용해야 함
 	if req.Options.Stream {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -188,7 +193,8 @@ func (h *ChatHandler) Chat(c *gin.Context) {
 		)
 		h.writeLog(traceID, clientID, c.ClientIP(), &req, nil, attempts, totalLatency, err)
 		c.JSON(http.StatusBadGateway, gin.H{
-			"error": "프로바이더 요청 실패: " + err.Error(),
+			"error":    "프로바이더 요청 실패",
+			"trace_id": traceID,
 		})
 		return
 	}

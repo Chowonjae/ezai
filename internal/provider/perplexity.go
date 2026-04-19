@@ -83,6 +83,9 @@ func (p *PerplexityProvider) ChatStream(ctx context.Context, req *model.ChatRequ
 	params := openai.ChatCompletionNewParams{
 		Model:    req.Model,
 		Messages: messages,
+		StreamOptions: openai.ChatCompletionStreamOptionsParam{
+			IncludeUsage: openai.Bool(true),
+		},
 	}
 	if req.Options.Temperature != nil {
 		params.Temperature = openai.Float(*req.Options.Temperature)
@@ -112,6 +115,20 @@ func (p *PerplexityProvider) ChatStream(ctx context.Context, req *model.ChatRequ
 				case <-ctx.Done():
 					return
 				}
+			}
+			if chunk.Usage.TotalTokens > 0 {
+				select {
+				case ch <- model.StreamChunk{
+					Done: true,
+					Usage: &model.UsageInfo{
+						InputTokens:  int(chunk.Usage.PromptTokens),
+						OutputTokens: int(chunk.Usage.CompletionTokens),
+						TotalTokens:  int(chunk.Usage.TotalTokens),
+					},
+				}:
+				case <-ctx.Done():
+				}
+				return
 			}
 		}
 		if err := stream.Err(); err != nil {
