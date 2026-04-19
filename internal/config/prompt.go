@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
@@ -21,6 +22,7 @@ type PromptConfig struct {
 // 모델 특화 오버라이드: tasks/{task}.{model}.yaml > tasks/{task}.yaml
 type PromptManager struct {
 	promptsDir string
+	mu         sync.RWMutex
 	cache      map[string]*PromptConfig // 파일 경로 → 파싱 결과 캐시
 }
 
@@ -93,11 +95,14 @@ func (pm *PromptManager) Build(provider, project, task string, variables map[str
 	return strings.TrimSpace(result), nil
 }
 
-// load - YAML 프롬프트 파일 로드 (캐시 적용)
+// load - YAML 프롬프트 파일 로드 (캐시 적용, 동시성 안전)
 func (pm *PromptManager) load(relativePath string) (*PromptConfig, error) {
+	pm.mu.RLock()
 	if cached, ok := pm.cache[relativePath]; ok {
+		pm.mu.RUnlock()
 		return cached, nil
 	}
+	pm.mu.RUnlock()
 
 	fullPath := filepath.Join(pm.promptsDir, relativePath)
 	data, err := os.ReadFile(fullPath)
@@ -110,7 +115,9 @@ func (pm *PromptManager) load(relativePath string) (*PromptConfig, error) {
 		return nil, fmt.Errorf("프롬프트 파싱 실패 (%s): %w", relativePath, err)
 	}
 
+	pm.mu.Lock()
 	pm.cache[relativePath] = cfg
+	pm.mu.Unlock()
 	return cfg, nil
 }
 

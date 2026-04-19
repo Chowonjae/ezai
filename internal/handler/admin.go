@@ -217,3 +217,36 @@ func (h *AdminHandler) ListLogs(c *gin.Context) {
 		"count": len(entries),
 	})
 }
+
+// LogStats - GET /admin/logs/stats
+// 로그 통계를 group_by 기준으로 집계하여 반환한다.
+func (h *AdminHandler) LogStats(c *gin.Context) {
+	if h.logReader == nil {
+		c.JSON(http.StatusOK, gin.H{"stats": []any{}})
+		return
+	}
+
+	groupBy := c.Query("group_by")
+	if groupBy == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "group_by 파라미터가 필요합니다"})
+		return
+	}
+
+	q := store.LogStatsQuery{
+		GroupBy: groupBy,
+		Date:    c.Query("date"),
+		From:    c.Query("from"),
+		To:      c.Query("to"),
+	}
+
+	entries, err := h.logReader.Stats(q)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"stats": entries,
+		"count": len(entries),
+	})
+}

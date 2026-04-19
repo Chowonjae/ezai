@@ -62,6 +62,9 @@ func (a *AuditLog) List(limit int) ([]AuditEntry, error) {
 		}
 		entries = append(entries, e)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return entries, nil
 }
 
@@ -83,6 +86,9 @@ func (a *AuditLog) ListByKeyID(keyID int64) ([]AuditEntry, error) {
 			return nil, err
 		}
 		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return entries, nil
 }

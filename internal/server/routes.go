@@ -69,6 +69,7 @@ func registerRoutes(r *gin.Engine, d routesDeps) {
 			admin.DELETE("/keys/:id", d.adminHandler.DeleteKey)
 			admin.GET("/keys/audit", d.adminHandler.ListAuditLogs)
 			admin.GET("/logs", d.adminHandler.ListLogs)
+			admin.GET("/logs/stats", d.adminHandler.LogStats)
 		}
 	}
 

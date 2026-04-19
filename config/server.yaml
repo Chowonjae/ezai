@@ -22,7 +22,7 @@ auth:
     - "10.0.0.0/8"
     - "172.16.0.0/12"
     - "192.168.0.0/16"
-  api_key_header: "X-API-Key"
+  rate_limit_per_minute: 120
 
 providers:
   gemini:

@@ -79,7 +79,7 @@ type DatabaseConfig struct {
 // AuthConfig - 인증 설정
 type AuthConfig struct {
 	TrustedCIDRs []string `yaml:"trusted_cidrs"` // 신뢰 네트워크 CIDR 목록
-	APIKeyHeader string   `yaml:"api_key_header"` // API 키 헤더명
+	RateLimitPerMinute int `yaml:"rate_limit_per_minute"` // 분당 요청 제한 (기본값 120)
 }
 
 // ProviderConfig - 프로바이더별 설정
@@ -120,8 +120,8 @@ func Load(configDir string) (*Config, error) {
 	if cfg.Server.ShutdownTimeoutSec == 0 {
 		cfg.Server.ShutdownTimeoutSec = 30
 	}
-	if cfg.Auth.APIKeyHeader == "" {
-		cfg.Auth.APIKeyHeader = "X-API-Key"
+	if cfg.Auth.RateLimitPerMinute == 0 {
+		cfg.Auth.RateLimitPerMinute = 120
 	}
 
 	// fallback_global.yaml 로드 (선택적)

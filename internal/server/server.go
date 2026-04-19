@@ -29,6 +29,7 @@ type Server struct {
 	cfg        *config.Config
 	logWriter  *store.RequestLogWriter
 	consumer   *queue.Consumer
+	redis      *redis.Client
 }
 
 // Deps - 서버 의존성 (New 파라미터 정리용)
@@ -51,6 +52,8 @@ type Deps struct {
 	UsageAdmin      *store.UsageAdmin
 	RetentionConfig *config.RetentionConfig
 	ClientKeyStore  *store.ClientKeyStore
+	LoggingConfig   *config.LoggingConfig
+	ConfigDir       string
 }
 
 // New - 서버 생성
@@ -79,7 +82,7 @@ func New(d Deps) *Server {
 	// Redis Rate Limiting (Redis가 설정된 경우)
 	if d.Redis != nil {
 		engine.Use(middleware.RateLimit(d.Redis, middleware.RateLimitConfig{
-			RequestsPerMinute: 120,
+			RequestsPerMinute: d.Config.Auth.RateLimitPerMinute,
 		}, d.Logger))
 	}
 
@@ -100,10 +103,31 @@ func New(d Deps) *Server {
 	if d.Cache != nil {
 		chatHandler.SetCache(d.Cache)
 	}
+	if d.ConfigDir != "" {
+		chatHandler.SetConfigDir(d.ConfigDir)
+	}
+	if d.LoggingConfig != nil {
+		chatHandler.SetLoggingConfig(d.LoggingConfig)
+	}
 
 	healthHandler := handler.NewHealthHandler()
 	modelsHandler := handler.NewModelsHandler(d.Registry)
 	streamHandler := handler.NewStreamHandler(d.Registry, d.Logger)
+	if d.Router != nil {
+		streamHandler.SetRouter(d.Router)
+	}
+	if d.LogWriter != nil {
+		streamHandler.SetLogWriter(d.LogWriter)
+	}
+	if d.PromptManager != nil {
+		streamHandler.SetPromptManager(d.PromptManager)
+	}
+	if d.PricingManager != nil {
+		streamHandler.SetPricingManager(d.PricingManager)
+	}
+	if d.LoggingConfig != nil {
+		streamHandler.SetLoggingConfig(d.LoggingConfig)
+	}
 
 	// Usage 핸들러
 	var usageHandler *handler.UsageHandler
@@ -172,6 +196,7 @@ func New(d Deps) *Server {
 		cfg:        d.Config,
 		logWriter:  d.LogWriter,
 		consumer:   d.Consumer,
+		redis:      d.Redis,
 	}
 }
 
@@ -199,6 +224,9 @@ func (s *Server) Shutdown() error {
 	}
 	if s.logWriter != nil {
 		s.logWriter.Close()
+	}
+	if s.redis != nil {
+		s.redis.Close()
 	}
 
 	return s.httpServer.Shutdown(ctx)

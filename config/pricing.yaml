@@ -71,6 +71,16 @@ pricing:
     output_per_1m_tokens: 1.00
     currency: USD
     updated_at: "2026-04-17"
+  sonar-reasoning-pro:
+    input_per_1m_tokens: 2.00
+    output_per_1m_tokens: 8.00
+    currency: USD
+    updated_at: "2026-04-19"
+  sonar-reasoning:
+    input_per_1m_tokens: 1.00
+    output_per_1m_tokens: 5.00
+    currency: USD
+    updated_at: "2026-04-19"
 
   # Ollama (로컬, 무료)
   "ollama/*":

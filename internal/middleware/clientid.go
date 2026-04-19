@@ -29,7 +29,9 @@ func ClientID() gin.HandlerFunc {
 // GetClientID - 컨텍스트에서 client_id 조회
 func GetClientID(c *gin.Context) string {
 	if v, ok := c.Get(ClientIDKey); ok {
-		return v.(string)
+		if s, ok := v.(string); ok {
+			return s
+		}
 	}
 	return ""
 }

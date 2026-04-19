@@ -16,7 +16,7 @@ const TraceIDKey = "trace_id"
 // 형식: tr_YYYYMMDD_HHMMSS_{uuid_short}
 func RequestID() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		now := time.Now()
+		now := time.Now().UTC()
 		short := uuid.New().String()[:8]
 		traceID := fmt.Sprintf("tr_%s_%s", now.Format("20060102_150405"), short)
 
@@ -29,7 +29,9 @@ func RequestID() gin.HandlerFunc {
 // GetTraceID - 컨텍스트에서 trace_id 조회
 func GetTraceID(c *gin.Context) string {
 	if v, ok := c.Get(TraceIDKey); ok {
-		return v.(string)
+		if s, ok := v.(string); ok {
+			return s
+		}
 	}
 	return ""
 }

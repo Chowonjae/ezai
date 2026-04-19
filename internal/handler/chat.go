@@ -25,9 +25,16 @@ type ChatHandler struct {
 	router         *router.Router
 	promptManager  *config.PromptManager
 	pricingManager *config.PricingManager
+	loggingConfig  *config.LoggingConfig
 	cache          *cache.Cache
 	logger         *zap.Logger
 	logWriter      *store.RequestLogWriter
+	configDir      string
+}
+
+// SetRegistry - 레지스트리 설정 (api_key_id 조회용)
+func (h *ChatHandler) SetRegistry(r *provider.Registry) {
+	h.registry = r
 }
 
 // NewChatHandler - 채팅 핸들러 생성
@@ -63,6 +70,16 @@ func (h *ChatHandler) SetLogWriter(w *store.RequestLogWriter) {
 	h.logWriter = w
 }
 
+// SetLoggingConfig - 로깅 설정 (프라이버시/미리보기 길이 등)
+func (h *ChatHandler) SetLoggingConfig(lc *config.LoggingConfig) {
+	h.loggingConfig = lc
+}
+
+// SetConfigDir - 설정 디렉토리 경로 설정 (프로젝트별 fallback 로드용)
+func (h *ChatHandler) SetConfigDir(dir string) {
+	h.configDir = dir
+}
+
 // Chat - POST /chat
 func (h *ChatHandler) Chat(c *gin.Context) {
 	var req model.ChatRequest
@@ -83,6 +100,25 @@ func (h *ChatHandler) Chat(c *gin.Context) {
 			// 기존 system 메시지 앞에 조합된 프롬프트 추가
 			systemMsg := model.Message{Role: "system", Content: systemPrompt}
 			req.Messages = append([]model.Message{systemMsg}, req.Messages...)
+		}
+	}
+
+	// 프로젝트별 기본 fallback 적용 (요청에 fallback이 없고 project가 지정된 경우)
+	if req.Project != "" && len(req.Fallback) == 0 && h.configDir != "" {
+		if projCfg, err := config.LoadProjectFallback(h.configDir, req.Project); err == nil {
+			for _, entry := range projCfg.Fallback.DefaultChain {
+				// primary와 같은 프로바이더/모델은 건너뜀
+				if entry.Provider == req.Provider && entry.Model == req.Model {
+					continue
+				}
+				req.Fallback = append(req.Fallback, model.FallbackTarget{
+					Provider: entry.Provider,
+					Model:    entry.Model,
+				})
+			}
+			if req.FallbackPolicy == "" && projCfg.Fallback.Policy != "" {
+				req.FallbackPolicy = projCfg.Fallback.Policy
+			}
 		}
 	}
 
@@ -112,11 +148,8 @@ func (h *ChatHandler) Chat(c *gin.Context) {
 	var attempts []router.FallbackAttempt
 	var err error
 
-	if h.router != nil && (len(req.Fallback) > 0 || req.FallbackPolicy != "") {
-		// Router를 통한 실행 (fallback/circuit breaker 적용)
-		resp, attempts, err = h.router.Execute(c.Request.Context(), &req)
-	} else if h.router != nil {
-		// fallback 없어도 circuit breaker/세마포어는 적용
+	if h.router != nil {
+		// Router를 통한 실행 (fallback/circuit breaker/세마포어 적용)
 		resp, attempts, err = h.router.Execute(c.Request.Context(), &req)
 	} else {
 		// Router 미설정: 직접 프로바이더 호출
@@ -179,6 +212,8 @@ func (h *ChatHandler) writeLog(traceID, clientID, clientIP string, req *model.Ch
 		return
 	}
 
+	inputLen, outputLen := loggingPreviewLengths(h.loggingConfig)
+
 	log := &store.RequestLog{
 		TraceID:           traceID,
 		ClientID:          clientID,
@@ -187,10 +222,17 @@ func (h *ChatHandler) writeLog(traceID, clientID, clientIP string, req *model.Ch
 		Task:              req.Task,
 		RequestedProvider: req.Provider,
 		RequestedModel:    req.Model,
-		PromptHash:        hashPrompt(req.Messages),
-		InputPreview:      previewText(req.Messages),
+		PromptHash:        loggingHashPrompt(h.loggingConfig, req.Messages),
+		InputPreview:      previewText(req.Messages, inputLen),
 		LatencyMs:         totalLatencyMs,
 		SearchGrounding:   req.Options.SearchGrounding,
+	}
+
+	// api_key_id 채우기
+	if resp != nil && h.registry != nil {
+		if keyID, ok := h.registry.GetKeyID(resp.Provider); ok && keyID > 0 {
+			log.APIKeyID = keyID
+		}
 	}
 
 	// 옵션 JSON
@@ -222,7 +264,7 @@ func (h *ChatHandler) writeLog(traceID, clientID, clientIP string, req *model.Ch
 		log.CostUSD = resp.Usage.EstimatedCost
 		log.FallbackUsed = resp.Metadata.FallbackUsed
 		log.ProviderLatencyMs = totalLatencyMs
-		log.OutputPreview = truncate(resp.Content, 200)
+		log.OutputPreview = truncate(resp.Content, outputLen)
 		if resp.Metadata.FallbackReason != nil {
 			log.RoutingReason = *resp.Metadata.FallbackReason
 		}
@@ -231,8 +273,19 @@ func (h *ChatHandler) writeLog(traceID, clientID, clientIP string, req *model.Ch
 	h.logWriter.Write(log)
 }
 
-// hashPrompt - 메시지 내용을 SHA-256 해시로 변환
-func hashPrompt(messages []model.Message) string {
+// loggingPreviewLengths - 로깅 설정에서 미리보기 길이를 반환 (기본값 200)
+func loggingPreviewLengths(lc *config.LoggingConfig) (inputLen, outputLen int) {
+	if lc != nil {
+		return lc.Logging.Record.InputPreviewLength, lc.Logging.Record.OutputPreviewLength
+	}
+	return 200, 200
+}
+
+// loggingHashPrompt - 설정에 따라 프롬프트 해시를 반환 (비활성화 시 빈 문자열)
+func loggingHashPrompt(lc *config.LoggingConfig, messages []model.Message) string {
+	if lc != nil && !lc.Logging.Privacy.HashPrompts {
+		return ""
+	}
 	h := sha256.New()
 	for _, m := range messages {
 		h.Write([]byte(m.Role + ":" + m.Content))
@@ -240,11 +293,11 @@ func hashPrompt(messages []model.Message) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-// previewText - 마지막 사용자 메시지의 앞 200자
-func previewText(messages []model.Message) string {
+// previewText - 마지막 사용자 메시지의 앞 maxLen자
+func previewText(messages []model.Message, maxLen int) string {
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == "user" {
-			return truncate(messages[i].Content, 200)
+			return truncate(messages[i].Content, maxLen)
 		}
 	}
 	return ""

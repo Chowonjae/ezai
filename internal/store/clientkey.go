@@ -44,7 +44,10 @@ func (s *ClientKeyStore) Create(clientID, secretHash, secretPrefix, serviceName,
 		return nil, fmt.Errorf("클라이언트 키 등록 실패: %w", err)
 	}
 
-	id, _ := result.LastInsertId()
+	id, err := result.LastInsertId()
+	if err != nil {
+		return nil, fmt.Errorf("LastInsertId 조회 실패: %w", err)
+	}
 	return &ClientKey{
 		ID: id, ClientID: clientID, SecretPrefix: secretPrefix,
 		ServiceName: serviceName, Description: description,
@@ -87,6 +90,9 @@ func (s *ClientKeyStore) List() ([]ClientKey, error) {
 		}
 		keys = append(keys, k)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return keys, nil
 }
 
@@ -109,6 +115,9 @@ func (s *ClientKeyStore) ListByService(serviceName string) ([]ClientKey, error) 
 		}
 		keys = append(keys, k)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return keys, nil
 }
 
@@ -123,7 +132,10 @@ func (s *ClientKeyStore) RotateSecret(clientID, newSecretHash, newSecretPrefix s
 	if err != nil {
 		return fmt.Errorf("시크릿 교체 실패: %w", err)
 	}
-	rows, _ := result.RowsAffected()
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("RowsAffected 조회 실패: %w", err)
+	}
 	if rows == 0 {
 		return fmt.Errorf("활성 키를 찾을 수 없습니다: %s", clientID)
 	}
@@ -140,7 +152,10 @@ func (s *ClientKeyStore) Deactivate(clientID string) error {
 	if err != nil {
 		return fmt.Errorf("키 비활성화 실패: %w", err)
 	}
-	rows, _ := result.RowsAffected()
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("RowsAffected 조회 실패: %w", err)
+	}
 	if rows == 0 {
 		return fmt.Errorf("키를 찾을 수 없습니다: %s", clientID)
 	}
@@ -159,7 +174,10 @@ func (s *ClientKeyStore) Reissue(clientID, newSecretHash, newSecretPrefix string
 	if err != nil {
 		return fmt.Errorf("키 재발급 실패: %w", err)
 	}
-	rows, _ := result.RowsAffected()
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("RowsAffected 조회 실패: %w", err)
+	}
 	if rows == 0 {
 		return fmt.Errorf("키를 찾을 수 없습니다: %s", clientID)
 	}

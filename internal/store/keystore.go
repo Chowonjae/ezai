@@ -73,7 +73,10 @@ func (ks *KeyStore) Create(provider, keyName, keyValue, keyType string) (*Provid
 		return nil, fmt.Errorf("키 등록 실패: %w", err)
 	}
 
-	id, _ := result.LastInsertId()
+	id, err := result.LastInsertId()
+	if err != nil {
+		return nil, fmt.Errorf("LastInsertId 조회 실패: %w", err)
+	}
 	return &ProviderKey{
 		ID: id, Provider: provider, KeyName: keyName,
 		KeyType: keyType, IsActive: true, CreatedAt: now, UpdatedAt: now,
@@ -123,6 +126,30 @@ func (ks *KeyStore) GetActiveByProvider(provider string) (string, error) {
 	return string(decrypted), nil
 }
 
+// GetActiveByProviderWithID - 프로바이더별 활성 키 조회 (ID + 복호화된 값)
+func (ks *KeyStore) GetActiveByProviderWithID(provider string) (int64, string, error) {
+	var id int64
+	var encrypted []byte
+	err := ks.db.QueryRow(
+		`SELECT id, encrypted_value FROM provider_keys
+		 WHERE provider = ? AND is_active = 1
+		 ORDER BY updated_at DESC LIMIT 1`, provider,
+	).Scan(&id, &encrypted)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return 0, "", fmt.Errorf("프로바이더 '%s'에 대한 활성 키가 없습니다", provider)
+		}
+		return 0, "", fmt.Errorf("키 조회 실패: %w", err)
+	}
+
+	decrypted, err := ks.encryptor.Decrypt(encrypted)
+	if err != nil {
+		return 0, "", fmt.Errorf("키 복호화 실패: %w", err)
+	}
+
+	return id, string(decrypted), nil
+}
+
 // List - 키 목록 조회 (값은 포함하지 않음)
 func (ks *KeyStore) List() ([]ProviderKey, error) {
 	rows, err := ks.db.Query(
@@ -141,6 +168,9 @@ func (ks *KeyStore) List() ([]ProviderKey, error) {
 			return nil, err
 		}
 		keys = append(keys, k)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("키 목록 순회 실패: %w", err)
 	}
 	return keys, nil
 }

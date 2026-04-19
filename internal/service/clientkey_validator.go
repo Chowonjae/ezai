@@ -34,7 +34,7 @@ func NewClientKeyService(store *store.ClientKeyStore, redis *redis.Client) *Clie
 func (s *ClientKeyService) Validate(clientID, secret string) (*middleware.ValidatedKey, error) {
 	key, err := s.store.GetByClientID(clientID)
 	if err != nil {
-		return nil, fmt.Errorf("키 조회 실패")
+		return nil, fmt.Errorf("키 조회 실패: %w", err)
 	}
 	if key == nil {
 		return nil, fmt.Errorf("유효하지 않은 클라이언트 ID")
@@ -47,7 +47,7 @@ func (s *ClientKeyService) Validate(clientID, secret string) (*middleware.Valida
 	// 만료 확인
 	expiresAt, err := time.Parse(time.RFC3339, key.ExpiresAt)
 	if err != nil {
-		return nil, fmt.Errorf("만료 시간 파싱 실패")
+		return nil, fmt.Errorf("만료 시간 파싱 실패: %w", err)
 	}
 	if time.Now().UTC().After(expiresAt) {
 		return nil, fmt.Errorf("만료된 키입니다")

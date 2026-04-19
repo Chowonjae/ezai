@@ -63,7 +63,7 @@ func (ur *UsageReader) DB() *sql.DB {
 // Query - 사용량 집계 조회
 func (ur *UsageReader) Query(q UsageQuery) (*UsageResult, error) {
 	// 기간 조건 구성
-	dateFilter, periodLabel := buildDateFilter(q)
+	dateFilter, dateArgs, periodLabel := buildDateFilter(q)
 
 	// WHERE 조건 구성
 	var conditions []string
@@ -71,6 +71,7 @@ func (ur *UsageReader) Query(q UsageQuery) (*UsageResult, error) {
 
 	if dateFilter != "" {
 		conditions = append(conditions, dateFilter)
+		args = append(args, dateArgs...)
 	}
 	if q.Provider != "" {
 		conditions = append(conditions, "actual_provider = ?")
@@ -136,34 +137,37 @@ func (ur *UsageReader) Query(q UsageQuery) (*UsageResult, error) {
 				}
 				result.Breakdown = append(result.Breakdown, b)
 			}
+			if err := rows.Err(); err != nil {
+				return nil, err
+			}
 		}
 	}
 
 	return result, nil
 }
 
-// buildDateFilter - 기간 필터 SQL + 라벨
-func buildDateFilter(q UsageQuery) (string, string) {
+// buildDateFilter - 기간 필터 SQL + 파라미터 + 라벨
+func buildDateFilter(q UsageQuery) (string, []any, string) {
 	switch q.Period {
 	case "daily":
 		if q.Date != "" {
-			return fmt.Sprintf("date(timestamp) = '%s'", q.Date), q.Date
+			return "date(timestamp) = ?", []any{q.Date}, q.Date
 		}
 	case "monthly":
 		if q.Month != "" {
-			return fmt.Sprintf("strftime('%%Y-%%m', timestamp) = '%s'", q.Month), q.Month
+			return "strftime('%Y-%m', timestamp) = ?", []any{q.Month}, q.Month
 		}
 	case "yearly":
 		if q.Year != "" {
-			return fmt.Sprintf("strftime('%%Y', timestamp) = '%s'", q.Year), q.Year
+			return "strftime('%Y', timestamp) = ?", []any{q.Year}, q.Year
 		}
 	case "custom":
 		if q.From != "" && q.To != "" {
-			return fmt.Sprintf("date(timestamp) BETWEEN '%s' AND '%s'", q.From, q.To),
+			return "date(timestamp) BETWEEN ? AND ?", []any{q.From, q.To},
 				fmt.Sprintf("%s ~ %s", q.From, q.To)
 		}
 	}
-	return "", "all"
+	return "", nil, "all"
 }
 
 // mapGroupBy - group_by 파라미터를 DB 컬럼명으로 매핑

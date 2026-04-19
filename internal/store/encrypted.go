@@ -41,9 +41,10 @@ func OpenEncryptedDB(dbPath string, dbKey string) (*sql.DB, error) {
 	}
 
 	// DB 파일 권한 설정 (소유자만 읽기/쓰기)
-	if err := os.Chmod(dbPath, 0600); err != nil {
-		// 파일이 아직 생성되지 않았을 수 있으므로 경고만
-		_ = err
+	if _, statErr := os.Stat(dbPath); statErr == nil {
+		if err := os.Chmod(dbPath, 0600); err != nil {
+			return nil, fmt.Errorf("DB 파일 권한 설정 실패: %w", err)
+		}
 	}
 
 	return db, nil

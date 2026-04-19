@@ -1,0 +1,15 @@
+logging:
+  # 기록 범위
+  record:
+    input_preview: true          # 입력 앞 200자 기록
+    input_preview_length: 200
+    output_preview: true         # 출력 앞 200자 기록
+    output_preview_length: 200
+    full_prompt: false           # 전체 프롬프트 기록 (개인정보 주의, 기본 OFF)
+    full_response: false         # 전체 응답 기록 (용량 주의, 기본 OFF)
+
+  # 민감정보 처리
+  privacy:
+    hash_prompts: true           # 프롬프트를 해시로만 저장
+    mask_api_keys: true          # 로그에 API 키 마스킹
+    mask_pii: false              # PII 자동 마스킹 (확장 시)

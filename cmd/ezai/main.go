@@ -128,7 +128,7 @@ func runServe() {
 		clientKeyStore = store.NewClientKeyStore(keysDB)
 		logger.Info("키 DB 초기화 완료 (암호화)", zap.String("path", cfg.Database.KeysPath))
 	} else {
-		logger.Warn("EZAI_DB_KEY 미설정: 키 관리 기능 비활성화")
+		logger.Warn("EZAI_DB_KEY 미설정: API 키 관리, 감사 로그, 클라이언트 키 인증 비활성화")
 	}
 
 	// 프로바이더 레지스트리
@@ -175,6 +175,10 @@ func runServe() {
 		logger.Info("보존 정책 설정 로드 완료")
 	}
 
+	// 로깅 설정 로드
+	loggingConfig := config.LoadLoggingConfig(configDir)
+	logger.Info("로깅 설정 로드 완료")
+
 	// 프롬프트 매니저
 	promptsDir := os.Getenv("EZAI_PROMPTS_DIR")
 	if promptsDir == "" {
@@ -197,7 +201,7 @@ func runServe() {
 		PoolSize: cfg.Redis.PoolSize,
 	})
 	if err := rdb.Ping(ctx).Err(); err != nil {
-		logger.Warn("Redis 연결 실패", zap.Error(err))
+		logger.Warn("Redis 연결 실패: 캐시, 배치 처리, Rate Limiting 비활성화", zap.Error(err))
 		rdb = nil
 	} else {
 		logger.Info("Redis 연결 완료", zap.String("addr", cfg.Redis.Addr))
@@ -205,6 +209,9 @@ func runServe() {
 		jobStore = queue.NewJobStore(rdb)
 		producer = queue.NewProducer(rdb, jobStore)
 		consumer = queue.NewConsumer(rdb, registry, jobStore, logger, 3)
+		if rt != nil {
+			consumer.SetRouter(rt)
+		}
 		consumer.Start(ctx)
 		logger.Info("배치 Consumer 시작 (workers: 3)")
 	}
@@ -229,6 +236,8 @@ func runServe() {
 		UsageAdmin:      usageAdmin,
 		RetentionConfig: retentionCfg,
 		ClientKeyStore:  clientKeyStore,
+		LoggingConfig:   loggingConfig,
+		ConfigDir:       configDir,
 	})
 
 	go func() {
@@ -540,18 +549,24 @@ func openKeyStore() (*store.KeyStore, *store.AuditLog) {
 // ============================================================
 
 // resolveKey - keys.db에서 키 조회, 없으면 환경변수 fallback
-func resolveKey(keyStore *store.KeyStore, providerName, envVar string, logger *zap.Logger) string {
+// resolveKeyResult - API 키 조회 결과
+type resolveKeyResult struct {
+	Key   string
+	KeyID int64
+}
+
+func resolveKey(keyStore *store.KeyStore, providerName, envVar string, logger *zap.Logger) resolveKeyResult {
 	if keyStore != nil {
-		if key, err := keyStore.GetActiveByProvider(providerName); err == nil && key != "" {
+		if id, key, err := keyStore.GetActiveByProviderWithID(providerName); err == nil && key != "" {
 			logger.Info("키 로드 (keys.db)", zap.String("provider", providerName))
-			return key
+			return resolveKeyResult{Key: key, KeyID: id}
 		}
 	}
 	if val := os.Getenv(envVar); val != "" {
 		logger.Info("키 로드 (환경변수)", zap.String("provider", providerName), zap.String("env", envVar))
-		return val
+		return resolveKeyResult{Key: val}
 	}
-	return ""
+	return resolveKeyResult{}
 }
 
 // registerProviders - 설정에 따라 프로바이더를 레지스트리에 등록
@@ -563,9 +578,11 @@ func registerProviders(ctx context.Context, cfg *config.Config, registry *provid
 			location = "us-central1"
 		}
 		saJSON := ""
+		var geminiKeyID int64
 		if keyStore != nil {
-			if val, err := keyStore.GetActiveByProvider("gemini"); err == nil && val != "" {
+			if id, val, err := keyStore.GetActiveByProviderWithID("gemini"); err == nil && val != "" {
 				saJSON = val
+				geminiKeyID = id
 				logger.Info("키 로드 (keys.db)", zap.String("provider", "gemini"))
 			}
 		}
@@ -587,43 +604,43 @@ func registerProviders(ctx context.Context, cfg *config.Config, registry *provid
 		if err != nil {
 			logger.Warn("Gemini 프로바이더 초기화 실패", zap.Error(err))
 		} else {
-			registry.Register(gemini)
+			registry.RegisterWithKeyID(gemini, geminiKeyID)
 			logger.Info("프로바이더 등록", zap.String("provider", "gemini"))
 		}
 	}
 
 	// Claude (Anthropic)
 	if provCfg, ok := cfg.Providers["claude"]; ok && provCfg.Enabled {
-		apiKey := resolveKey(keyStore, "claude", "ANTHROPIC_API_KEY", logger)
-		claude, err := provider.NewClaudeProvider(apiKey)
+		resolved := resolveKey(keyStore, "claude", "ANTHROPIC_API_KEY", logger)
+		claude, err := provider.NewClaudeProvider(resolved.Key)
 		if err != nil {
 			logger.Warn("Claude 프로바이더 초기화 실패", zap.Error(err))
 		} else {
-			registry.Register(claude)
+			registry.RegisterWithKeyID(claude, resolved.KeyID)
 			logger.Info("프로바이더 등록", zap.String("provider", "claude"))
 		}
 	}
 
 	// GPT (OpenAI)
 	if provCfg, ok := cfg.Providers["gpt"]; ok && provCfg.Enabled {
-		apiKey := resolveKey(keyStore, "gpt", "OPENAI_API_KEY", logger)
-		gpt, err := provider.NewGPTProvider(apiKey)
+		resolved := resolveKey(keyStore, "gpt", "OPENAI_API_KEY", logger)
+		gpt, err := provider.NewGPTProvider(resolved.Key)
 		if err != nil {
 			logger.Warn("GPT 프로바이더 초기화 실패", zap.Error(err))
 		} else {
-			registry.Register(gpt)
+			registry.RegisterWithKeyID(gpt, resolved.KeyID)
 			logger.Info("프로바이더 등록", zap.String("provider", "gpt"))
 		}
 	}
 
 	// Perplexity
 	if provCfg, ok := cfg.Providers["perplexity"]; ok && provCfg.Enabled {
-		apiKey := resolveKey(keyStore, "perplexity", "PERPLEXITY_API_KEY", logger)
-		perplexity, err := provider.NewPerplexityProvider(apiKey, provCfg.BaseURL)
+		resolved := resolveKey(keyStore, "perplexity", "PERPLEXITY_API_KEY", logger)
+		perplexity, err := provider.NewPerplexityProvider(resolved.Key, provCfg.BaseURL)
 		if err != nil {
 			logger.Warn("Perplexity 프로바이더 초기화 실패", zap.Error(err))
 		} else {
-			registry.Register(perplexity)
+			registry.RegisterWithKeyID(perplexity, resolved.KeyID)
 			logger.Info("프로바이더 등록", zap.String("provider", "perplexity"))
 		}
 	}

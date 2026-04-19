@@ -93,7 +93,10 @@ func (ua *UsageAdmin) Archive(before string) (*ArchiveResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("아카이브 집계 INSERT 실패: %w", err)
 	}
-	summaryRows, _ := result.RowsAffected()
+	summaryRows, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("RowsAffected 조회 실패: %w", err)
+	}
 
 	// 원본 로그 삭제
 	delResult, err := tx.Exec(
@@ -102,7 +105,10 @@ func (ua *UsageAdmin) Archive(before string) (*ArchiveResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("아카이브 원본 삭제 실패: %w", err)
 	}
-	deletedRows, _ := delResult.RowsAffected()
+	deletedRows, err := delResult.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("RowsAffected 조회 실패: %w", err)
+	}
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("아카이브 트랜잭션 커밋 실패: %w", err)
@@ -122,12 +128,22 @@ func (ua *UsageAdmin) Archive(before string) (*ArchiveResult, error) {
 func (ua *UsageAdmin) SoftReset(before string) (*SoftResetResult, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	_, err := ua.db.Exec(`
+	tx, err := ua.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("트랜잭션 시작 실패: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(`
 		UPDATE request_logs
 		SET cost_usd = 0
 		WHERE date(timestamp) < ?`, before)
 	if err != nil {
 		return nil, fmt.Errorf("소프트 리셋 실패: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("소프트 리셋 커밋 실패: %w", err)
 	}
 
 	return &SoftResetResult{
@@ -141,13 +157,26 @@ func (ua *UsageAdmin) SoftReset(before string) (*SoftResetResult, error) {
 func (ua *UsageAdmin) HardDelete(before string) (*HardDeleteResult, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	result, err := ua.db.Exec(
+	tx, err := ua.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("트랜잭션 시작 실패: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.Exec(
 		`DELETE FROM request_logs WHERE date(timestamp) < ?`, before,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("하드 삭제 실패: %w", err)
 	}
-	deleted, _ := result.RowsAffected()
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("RowsAffected 조회 실패: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("하드 삭제 커밋 실패: %w", err)
+	}
 
 	return &HardDeleteResult{
 		DeletedRows: int(deleted),

@@ -205,6 +205,7 @@ ezai/
 │   │   └── job.go               ← BatchJob
 │   ├── config/                  ← 설정 로드
 │   │   ├── config.go            ← server.yaml, fallback_global.yaml 로드
+│   │   ├── logging.go           ← 로깅 정책 로드 (logging.yaml)
 │   │   ├── pricing.go           ← 가격 테이블 관리 + 비용 계산
 │   │   ├── prompt.go            ← 프롬프트 계층 조합 엔진
 │   │   └── retention.go         ← 보존 정책 로드
@@ -245,6 +246,7 @@ ezai/
 │   ├── server.yaml              ← 서버, Redis, DB, 인증, 프로바이더 설정
 │   ├── fallback_global.yaml     ← Circuit Breaker + 프로바이더별 동시성
 │   ├── pricing.yaml             ← 모델별 토큰 단가
+│   ├── logging.yaml             ← 로깅 정책 (프라이버시, 미리보기 길이)
 │   ├── usage_retention.yaml     ← 로그/비용 보존 정책
 │   └── projects/
 │       └── default.yaml         ← 기본 프로젝트 fallback 설정
@@ -338,6 +340,7 @@ auth:
     - "10.0.0.0/8"
     - "172.16.0.0/12"
     - "192.168.0.0/16"
+  rate_limit_per_minute: 120   # 클라이언트당 분당 요청 제한 (기본값: 120)
 
 providers:
   gemini:
@@ -389,13 +392,46 @@ providers:
 |------|---------------------|----------------------|
 | gemini-2.5-pro | 1.25 | 10.00 |
 | gemini-2.5-flash | 0.15 | 0.60 |
+| gemini-2.5-flash-lite | 0.075 | 0.30 |
+| gemini-2.0-flash | 0.10 | 0.40 |
+| gemini-2.0-flash-lite | 0.075 | 0.30 |
 | claude-opus-4-6 | 15.00 | 75.00 |
 | claude-sonnet-4-6 | 3.00 | 15.00 |
-| claude-haiku-4-5 | 0.80 | 4.00 |
+| claude-haiku-4-5-20251001 | 0.80 | 4.00 |
 | gpt-4o | 2.50 | 10.00 |
 | gpt-4o-mini | 0.15 | 0.60 |
+| gpt-4-turbo | 10.00 | 30.00 |
 | sonar-pro | 3.00 | 15.00 |
+| sonar | 1.00 | 1.00 |
+| sonar-reasoning-pro | 2.00 | 8.00 |
+| sonar-reasoning | 1.00 | 5.00 |
 | ollama/* | 0 | 0 |
+
+### 로깅 정책 (`config/logging.yaml`)
+
+요청/응답 로그의 기록 범위와 민감정보 처리 방식을 설정한다. 이 파일이 없으면 기본값이 적용된다.
+
+```yaml
+logging:
+  # 기록 범위
+  record:
+    input_preview: true          # 입력 미리보기 기록 여부
+    input_preview_length: 200    # 입력 미리보기 최대 길이 (자)
+    output_preview: true         # 출력 미리보기 기록 여부
+    output_preview_length: 200   # 출력 미리보기 최대 길이 (자)
+    full_prompt: false           # 전체 프롬프트 기록 (개인정보 주의, 기본 OFF)
+    full_response: false         # 전체 응답 기록 (용량 주의, 기본 OFF)
+
+  # 민감정보 처리
+  privacy:
+    hash_prompts: true           # 프롬프트를 SHA-256 해시로만 저장
+    mask_api_keys: true          # 로그에 API 키 마스킹
+    mask_pii: false              # PII 자동 마스킹 (확장 시)
+```
+
+- `input_preview_length` / `output_preview_length`: `request_logs` 테이블의 `input_preview`, `output_preview` 컬럼에 저장되는 텍스트의 최대 길이. 동기(chat) 및 스트리밍(stream) 요청 모두에 동일하게 적용된다.
+- `hash_prompts`: `true`로 설정하면 프롬프트 원문 대신 SHA-256 해시(앞 16자)만 `prompt_hash` 컬럼에 저장된다. 동일 프롬프트 패턴 분석에 활용할 수 있다.
+- `full_prompt` / `full_response`: 디버깅 용도로 전체 내용을 기록할 때 사용한다. 프로덕션 환경에서는 개인정보 보호와 저장 용량을 고려하여 `false`(기본값)를 권장한다.
 
 ---
 
@@ -908,6 +944,11 @@ curl -X POST http://localhost:8080/admin/keys \
   -H "Content-Type: application/json" \
   -d '{"provider": "claude", "key_name": "backup", "key_value": "sk-ant-..."}'
 
+# 키 값 업데이트 (기존 키 ID 유지)
+curl -X PUT http://localhost:8080/admin/keys/1 \
+  -H "Content-Type: application/json" \
+  -d '{"key_value": "sk-ant-updated-..."}'
+
 # 키 로테이션 (기존 키 비활성화 + 새 키 등록)
 curl -X POST http://localhost:8080/admin/keys/1/rotate \
   -H "Content-Type: application/json" \
@@ -934,6 +975,12 @@ curl "http://localhost:8080/admin/logs?fallback_used=true"
 
 # 특정 프로바이더, 날짜 필터
 curl "http://localhost:8080/admin/logs?provider=gemini&date=2026-04-17"
+
+# 로그 통계 (프로바이더별 집계)
+curl "http://localhost:8080/admin/logs/stats?group_by=provider"
+
+# 로그 통계 (날짜 필터)
+curl "http://localhost:8080/admin/logs/stats?group_by=model&date=2026-04-17"
 ```
 
 ### 비용 데이터 관리

@@ -12,12 +12,14 @@ import (
 type Registry struct {
 	mu        sync.RWMutex
 	providers map[string]Provider
+	keyIDs    map[string]int64 // 프로바이더별 사용 중인 API 키 ID
 }
 
 // NewRegistry - 새 레지스트리 생성
 func NewRegistry() *Registry {
 	return &Registry{
 		providers: make(map[string]Provider),
+		keyIDs:    make(map[string]int64),
 	}
 }
 
@@ -26,6 +28,22 @@ func (r *Registry) Register(p Provider) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.providers[p.Name()] = p
+}
+
+// RegisterWithKeyID - 프로바이더 등록 (API 키 ID 포함)
+func (r *Registry) RegisterWithKeyID(p Provider, keyID int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.providers[p.Name()] = p
+	r.keyIDs[p.Name()] = keyID
+}
+
+// GetKeyID - 프로바이더의 API 키 ID 조회
+func (r *Registry) GetKeyID(providerName string) (int64, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	id, ok := r.keyIDs[providerName]
+	return id, ok
 }
 
 // Get - 이름으로 프로바이더 조회

@@ -17,6 +17,7 @@ import (
 // Router - 요청 라우팅 + fallback 실행 엔진
 type Router struct {
 	registry   *provider.Registry
+	fbCfg      *config.FallbackGlobalConfig
 	breakers   map[string]*CircuitBreaker
 	semaphores map[string]*concurrency.Semaphore
 	logger     *zap.Logger
@@ -41,6 +42,7 @@ func NewRouter(registry *provider.Registry, fbCfg *config.FallbackGlobalConfig, 
 
 	return &Router{
 		registry:   registry,
+		fbCfg:      fbCfg,
 		breakers:   breakers,
 		semaphores: semaphores,
 		logger:     logger,
@@ -242,9 +244,11 @@ func (r *Router) executeFastest(ctx context.Context, req *model.ChatRequest, tar
 
 		if res.err == nil && res.resp != nil {
 			cancel() // 나머지 요청 취소
-			res.resp.Metadata.FallbackUsed = true
-			reason := "always_fastest - 가장 빠른 응답 사용"
-			res.resp.Metadata.FallbackReason = &reason
+			if len(targets) > 1 {
+				res.resp.Metadata.FallbackUsed = true
+				reason := "always_fastest - 가장 빠른 응답 사용"
+				res.resp.Metadata.FallbackReason = &reason
+			}
 			return res.resp, attempts, nil
 		}
 		lastErr = res.err
@@ -264,13 +268,61 @@ func (r *Router) buildTargets(req *model.ChatRequest) []model.FallbackTarget {
 
 // getProviderTimeout - 프로바이더별 타임아웃(ms) 조회
 func (r *Router) getProviderTimeout(providerName string) (int, bool) {
-	// breakers 맵에서 프로바이더가 존재하면 타임아웃 정보가 있다고 가정
-	// 실제 타임아웃 값은 config에서 가져와야 하지만, Router에 config 참조 추가 필요
-	// 현재는 기본값 30000ms 반환
-	if _, ok := r.breakers[providerName]; ok {
-		return 30000, true
+	if r.fbCfg != nil {
+		if pCfg, ok := r.fbCfg.Providers[providerName]; ok && pCfg.TimeoutMs > 0 {
+			return pCfg.TimeoutMs, true
+		}
 	}
 	return 0, false
+}
+
+// BuildTargets - primary + fallback 대상 목록 구성 (외부 사용용)
+func (r *Router) BuildTargets(req *model.ChatRequest) []model.FallbackTarget {
+	return r.buildTargets(req)
+}
+
+// CheckCircuitBreaker - Circuit Breaker 상태 확인 (스트리밍 등 외부 사용용)
+func (r *Router) CheckCircuitBreaker(providerName string) error {
+	if cb, ok := r.breakers[providerName]; ok {
+		if !cb.Allow() {
+			return fmt.Errorf("프로바이더 '%s' Circuit Breaker 열림", providerName)
+		}
+	}
+	return nil
+}
+
+// AcquireSemaphore - 세마포어 획득 (스트리밍 등 외부 사용용)
+func (r *Router) AcquireSemaphore(ctx context.Context, providerName string) error {
+	if sem, ok := r.semaphores[providerName]; ok {
+		return sem.Acquire(ctx)
+	}
+	return nil
+}
+
+// ReleaseSemaphore - 세마포어 해제
+func (r *Router) ReleaseSemaphore(providerName string) {
+	if sem, ok := r.semaphores[providerName]; ok {
+		sem.Release()
+	}
+}
+
+// RecordSuccess - 성공 기록 (스트리밍 등 외부 사용용)
+func (r *Router) RecordSuccess(providerName string) {
+	if cb, ok := r.breakers[providerName]; ok {
+		cb.RecordSuccess()
+	}
+}
+
+// RecordFailure - 실패 기록 (스트리밍 등 외부 사용용)
+func (r *Router) RecordFailure(providerName string) {
+	if cb, ok := r.breakers[providerName]; ok {
+		cb.RecordFailure()
+	}
+}
+
+// ProviderTimeout - 프로바이더별 타임아웃(ms) 조회 (외부 사용용)
+func (r *Router) ProviderTimeout(providerName string) (int, bool) {
+	return r.getProviderTimeout(providerName)
 }
 
 // CircuitBreakerStats - 모든 프로바이더의 Circuit Breaker 상태 조회

@@ -10,6 +10,7 @@ import (
 
 	"github.com/Chowonjae/ezai/internal/model"
 	"github.com/Chowonjae/ezai/internal/provider"
+	"github.com/Chowonjae/ezai/internal/router"
 )
 
 // Consumer - 배치 큐 소비자
@@ -17,6 +18,7 @@ import (
 type Consumer struct {
 	rdb      *redis.Client
 	registry *provider.Registry
+	router   *router.Router
 	jobStore *JobStore
 	logger   *zap.Logger
 	workers  int
@@ -35,6 +37,11 @@ func NewConsumer(rdb *redis.Client, registry *provider.Registry, jobStore *JobSt
 		logger:   logger,
 		workers:  workers,
 	}
+}
+
+// SetRouter - 라우터 설정 (fallback/circuit breaker 적용)
+func (c *Consumer) SetRouter(r *router.Router) {
+	c.router = r
 }
 
 // Start - Worker goroutine 풀 시작
@@ -105,30 +112,48 @@ func (c *Consumer) processItem(ctx context.Context, itemJSON string) {
 
 	c.logger.Info("배치 처리 시작", zap.String("job_id", item.JobID), zap.String("provider", req.Provider))
 
-	// 상태: processing
-	_ = c.jobStore.UpdateStatus(ctx, item.JobID, model.JobProcessing)
-
-	// 프로바이더 조회 및 실행
-	p, err := c.registry.Get(req.Provider)
-	if err != nil {
-		c.failJob(ctx, item.JobID, err)
-		return
+	// 원래 생성 시각 보존 (상태 변경 전에 조회)
+	createdAt := time.Now().UTC()
+	if existing, err := c.jobStore.Get(ctx, item.JobID); err == nil {
+		createdAt = existing.CreatedAt
 	}
 
-	resp, err := p.Chat(ctx, &req)
+	// 상태: processing
+	if err := c.jobStore.UpdateStatus(ctx, item.JobID, model.JobProcessing); err != nil {
+		c.logger.Warn("Job 상태 업데이트 실패", zap.String("job_id", item.JobID), zap.Error(err))
+	}
+
+	// Router를 통한 실행 (fallback/circuit breaker/세마포어 적용)
+	var resp *model.ChatResponse
+	var err error
+
+	if c.router != nil {
+		resp, _, err = c.router.Execute(ctx, &req)
+	} else {
+		// Router 미설정: 직접 프로바이더 호출
+		var p provider.Provider
+		p, err = c.registry.Get(req.Provider)
+		if err != nil {
+			c.failJob(ctx, item.JobID, createdAt, err)
+			return
+		}
+		resp, err = p.Chat(ctx, &req)
+	}
+
 	if err != nil {
-		c.failJob(ctx, item.JobID, err)
+		c.failJob(ctx, item.JobID, createdAt, err)
 		return
 	}
 
 	// 성공: Job 업데이트
+	now := time.Now().UTC()
 	job := &model.BatchJob{
 		JobID:     item.JobID,
 		Status:    model.JobCompleted,
 		Request:   &req,
 		Response:  resp,
-		CreatedAt: time.Now().UTC(), // 원래 생성 시각을 유지하려면 별도 관리 필요
-		UpdatedAt: time.Now().UTC(),
+		CreatedAt: createdAt,
+		UpdatedAt: now,
 	}
 	if err := c.jobStore.Save(ctx, job); err != nil {
 		c.logger.Error("Job 저장 실패", zap.String("job_id", item.JobID), zap.Error(err))
@@ -139,14 +164,18 @@ func (c *Consumer) processItem(ctx context.Context, itemJSON string) {
 }
 
 // failJob - Job 실패 처리
-func (c *Consumer) failJob(ctx context.Context, jobID string, err error) {
+func (c *Consumer) failJob(ctx context.Context, jobID string, createdAt time.Time, err error) {
 	errStr := err.Error()
+	now := time.Now().UTC()
 	job := &model.BatchJob{
 		JobID:     jobID,
 		Status:    model.JobFailed,
 		Error:     &errStr,
-		UpdatedAt: time.Now().UTC(),
+		CreatedAt: createdAt,
+		UpdatedAt: now,
 	}
-	_ = c.jobStore.Save(ctx, job)
+	if saveErr := c.jobStore.Save(ctx, job); saveErr != nil {
+		c.logger.Warn("실패 Job 저장 실패", zap.String("job_id", jobID), zap.Error(saveErr))
+	}
 	c.logger.Error("배치 처리 실패", zap.String("job_id", jobID), zap.Error(err))
 }

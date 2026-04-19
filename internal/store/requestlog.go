@@ -14,6 +14,7 @@ type RequestLog struct {
 	TraceID           string
 	ClientID          string
 	ClientIP          string
+	APIKeyID          int64 // 사용된 API 키 ID (FK)
 	Project           string
 	Task              string
 	RequestedProvider string
@@ -110,17 +111,19 @@ func (w *RequestLogWriter) insert(log *RequestLog) error {
 	// fallback 체인 JSON 직렬화
 	var fallbackJSON *string
 	if len(log.FallbackChain) > 0 {
-		data, _ := json.Marshal(log.FallbackChain)
-		s := string(data)
-		fallbackJSON = &s
+		if data, err := json.Marshal(log.FallbackChain); err == nil {
+			s := string(data)
+			fallbackJSON = &s
+		}
 	}
 
 	// 메타데이터 JSON 직렬화
 	var metadataJSON *string
 	if len(log.Metadata) > 0 {
-		data, _ := json.Marshal(log.Metadata)
-		s := string(data)
-		metadataJSON = &s
+		if data, err := json.Marshal(log.Metadata); err == nil {
+			s := string(data)
+			metadataJSON = &s
+		}
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -133,16 +136,21 @@ func (w *RequestLogWriter) insert(log *RequestLog) error {
 		searchGrounding = 1
 	}
 
+	var apiKeyID *int64
+	if log.APIKeyID > 0 {
+		apiKeyID = &log.APIKeyID
+	}
+
 	_, err := w.db.Exec(`
 		INSERT INTO request_logs (
-			trace_id, timestamp, client_id, client_ip, project, task,
+			trace_id, timestamp, client_id, client_ip, api_key_id, project, task,
 			requested_provider, requested_model, prompt_hash, input_preview, options_json,
 			actual_provider, actual_model, fallback_used, fallback_chain_json, routing_reason,
 			status, error_code, error_message, input_tokens, output_tokens,
 			cost_usd, latency_ms, provider_latency_ms, search_grounding,
 			output_preview, metadata_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		log.TraceID, now, log.ClientID, log.ClientIP, log.Project, log.Task,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		log.TraceID, now, log.ClientID, log.ClientIP, apiKeyID, log.Project, log.Task,
 		log.RequestedProvider, log.RequestedModel, log.PromptHash, log.InputPreview, log.OptionsJSON,
 		log.ActualProvider, log.ActualModel, fallbackUsed, fallbackJSON, log.RoutingReason,
 		log.Status, nilIfEmpty(log.ErrorCode), nilIfEmpty(log.ErrorMessage),
@@ -283,7 +291,105 @@ func (r *RequestLogReader) Query(q LogQuery) ([]LogEntry, error) {
 		e.FallbackUsed = fallback == 1
 		entries = append(entries, e)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return entries, nil
+}
+
+// LogStatsQuery - 로그 통계 조회 조건
+type LogStatsQuery struct {
+	GroupBy string // actual_provider, actual_model, project, client_id, status
+	Date    string
+	From    string
+	To      string
+}
+
+// LogStatsEntry - 로그 통계 항목
+type LogStatsEntry struct {
+	GroupKey     string  `json:"group_key"`
+	Requests    int     `json:"requests"`
+	Errors      int     `json:"errors"`
+	AvgLatencyMs float64 `json:"avg_latency_ms"`
+	InputTokens  int     `json:"input_tokens"`
+	OutputTokens int     `json:"output_tokens"`
+	CostUSD      float64 `json:"cost_usd"`
+}
+
+// Stats - GET /admin/logs/stats 로그 통계 집계
+func (r *RequestLogReader) Stats(q LogStatsQuery) ([]LogStatsEntry, error) {
+	groupCol := mapStatsGroupBy(q.GroupBy)
+	if groupCol == "" {
+		return nil, fmt.Errorf("유효하지 않은 group_by: %s", q.GroupBy)
+	}
+
+	var conditions []string
+	var args []any
+
+	if q.Date != "" {
+		conditions = append(conditions, "date(timestamp) = ?")
+		args = append(args, q.Date)
+	}
+	if q.From != "" && q.To != "" {
+		conditions = append(conditions, "date(timestamp) BETWEEN ? AND ?")
+		args = append(args, q.From, q.To)
+	}
+
+	whereClause := ""
+	if len(conditions) > 0 {
+		whereClause = "WHERE " + joinStrings(conditions, " AND ")
+	}
+
+	query := fmt.Sprintf(`
+		SELECT %s, COUNT(*),
+		       SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END),
+		       COALESCE(AVG(latency_ms), 0),
+		       COALESCE(SUM(input_tokens), 0),
+		       COALESCE(SUM(output_tokens), 0),
+		       COALESCE(SUM(cost_usd), 0)
+		FROM request_logs %s
+		GROUP BY %s ORDER BY COUNT(*) DESC`,
+		groupCol, whereClause, groupCol)
+
+	rows, err := r.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("통계 조회 실패: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []LogStatsEntry
+	for rows.Next() {
+		var e LogStatsEntry
+		if err := rows.Scan(
+			&e.GroupKey, &e.Requests, &e.Errors, &e.AvgLatencyMs,
+			&e.InputTokens, &e.OutputTokens, &e.CostUSD,
+		); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+// mapStatsGroupBy - group_by 파라미터를 DB 컬럼명으로 매핑
+func mapStatsGroupBy(groupBy string) string {
+	switch groupBy {
+	case "provider", "actual_provider":
+		return "actual_provider"
+	case "model", "actual_model":
+		return "actual_model"
+	case "project":
+		return "project"
+	case "client_id":
+		return "client_id"
+	case "status":
+		return "status"
+	default:
+		return ""
+	}
 }
 
 func joinStrings(ss []string, sep string) string {
